@@ -1,0 +1,10 @@
+# build
+app/target/
+**/target/
+# macOS
+.DS_Store
+# editor
+.vscode/
+.idea/
+.claude/
+prompt.md

@@ -1,0 +1,15 @@
+[package]
+name = "cdj-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cdj-proto = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+mac_address = { workspace = true }
+if-addrs = { workspace = true }
+anyhow = { workspace = true }
