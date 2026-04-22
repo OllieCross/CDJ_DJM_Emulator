@@ -31,27 +31,38 @@ enum Cmd {
         b_ip: String,
         #[arg(long, default_value_t = 24)]
         prefix: u8,
-        /// Also print teardown commands.
         #[arg(long)]
         teardown: bool,
     },
 
-    /// Run a full fleet: 4 virtual CDJs + 1 virtual DJM on the chosen iface.
+    /// Run a full fleet: N virtual CDJs + (optionally) a virtual DJM.
     RunFleet {
         #[arg(short, long)]
         iface: String,
         #[arg(long, default_value_t = 4)]
         players: u8,
-        #[arg(long, default_value_t = true)]
-        mixer: bool,
+        /// Omit the virtual DJM from the fleet.
+        #[arg(long)]
+        no_mixer: bool,
         #[arg(long, default_value = "CDJ-3000")]
         player_model: String,
         #[arg(long, default_value = "DJM-V10")]
         mixer_model: String,
+        /// Initial tempo in BPM (e.g. 128.0).
+        #[arg(long, default_value_t = 120.0)]
+        bpm: f32,
+        /// Start every player in the "playing" state so they emit beat
+        /// packets immediately. Useful for timecode / ShowKontrol dev.
+        #[arg(long)]
+        autoplay: bool,
+        /// Track files to load, one per player (up to 4). Pass the flag
+        /// multiple times: --track a.flac --track b.mp3. Players without a
+        /// track stay idle.
+        #[arg(long = "track")]
+        tracks: Vec<std::path::PathBuf>,
     },
 
-    /// Run a single virtual CDJ (M0 behaviour; useful for basic sanity
-    /// checks).
+    /// Run a single virtual CDJ (M0-style helper).
     Run {
         #[arg(short, long)]
         iface: String,
@@ -60,6 +71,10 @@ enum Cmd {
         #[arg(short, long, default_value = "CDJ-3000")]
         model: String,
     },
+}
+
+fn bpm_to_hundredths(bpm: f32) -> u16 {
+    (bpm * 100.0).round().clamp(0.0, u16::MAX as f32) as u16
 }
 
 #[tokio::main]
@@ -108,18 +123,25 @@ async fn main() -> Result<()> {
         Cmd::RunFleet {
             iface,
             players,
-            mixer,
+            no_mixer,
             player_model,
             mixer_model,
+            bpm,
+            autoplay,
+            tracks,
         } => {
             let iface = Interface::by_name(&iface)
                 .with_context(|| format!("resolving interface {iface}"))?;
+            let tracks = tracks.into_iter().map(Some).collect();
             let cfg = FleetConfig {
                 iface,
                 num_players: players,
-                include_mixer: mixer,
+                include_mixer: !no_mixer,
                 player_model,
                 mixer_model,
+                initial_bpm_hundredths: bpm_to_hundredths(bpm),
+                autoplay,
+                tracks,
             };
             Fleet::new(cfg).run().await?;
         }
@@ -130,16 +152,16 @@ async fn main() -> Result<()> {
         } => {
             let iface = Interface::by_name(&iface)
                 .with_context(|| format!("resolving interface {iface}"))?;
-            // Single-device run = a Fleet with 1 player and no mixer.
             let cfg = FleetConfig {
                 iface,
                 num_players: device_number.clamp(1, 4),
                 include_mixer: false,
                 player_model: model,
                 mixer_model: "DJM-V10".to_string(),
+                initial_bpm_hundredths: 12000,
+                autoplay: false,
+                tracks: Vec::new(),
             };
-            // Note: device_number arg only controls how many players are
-            // spawned (1..=4); use RunFleet for precise control.
             Fleet::new(cfg).run().await?;
         }
     }

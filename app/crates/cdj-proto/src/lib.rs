@@ -18,12 +18,14 @@
 //! See submodules for per-packet structures.
 
 pub mod announce;
+pub mod beat;
 pub mod claim;
 pub mod error;
 pub mod header;
 pub mod status;
 
 pub use announce::{KeepAlive, MIXER_NUM, PLAYER_NUM_MAX, PLAYER_NUM_MIN};
+pub use beat::Beat;
 pub use claim::{ClaimStage1, ClaimStage2, ClaimStage3, CLAIM_PACKET_SPACING_MS, CLAIM_REPEATS};
 pub use error::{DecodeError, EncodeError};
 pub use header::{DeviceName, Header, Magic, PacketKind, MAGIC, MAGIC_LEN};

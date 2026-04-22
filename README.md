@@ -8,9 +8,11 @@ consumers see a credible CDJ setup without any physical hardware.
 **North-star use case:** a smaller rental company pre-visualising timecode
 shows against individual tracks without owning or renting four CDJs and a DJM.
 
-> Status: **pre-alpha, M1 complete.** Full 4-CDJ + 1-DJM fleet in a single
-> process. Claim dance, keep-alive (:50000), and idle-state status
-> (:50002) broadcasting. No audio, no track DB, no NFS yet.
+> Status: **pre-alpha, M2.2 complete.** 4-CDJ + 1-DJM fleet, full Pro DJ
+> Link protocol (announce/claim/status/beat), plus per-player audio decode
+> (Symphonia: mp3/aac/m4a/flac/wav/alac) and CoreAudio output (CPAL).
+> Each player's audio playhead feeds back into shared state so the beat
+> clock can phase-lock to real playback in M2.3.
 > See [discovery.md](discovery.md) for the full backlog.
 
 ## Why not run the real firmware?
@@ -56,6 +58,17 @@ cargo build                # build the CLI
 # Full fleet: 4 CDJ-3000s + 1 DJM-V10 on the chosen iface.
 ./target/debug/cdjd run-fleet --iface en0
 
+# Same, but all 4 CDJs broadcast beat packets at 128 BPM immediately
+# (no audio; timecode-only mode for ShowKontrol dev):
+./target/debug/cdjd run-fleet --iface en0 --bpm 128 --autoplay
+
+# Full M2.2: load a track into player 1 and play it out the default output
+# while broadcasting beat/status. Pass --track up to 4 times (one per player).
+cargo build --release                   # recommended - MP3 decode is slow in debug
+./target/release/cdjd run-fleet --iface en0 --bpm 128 \
+    --track ~/Music/track1.wav \
+    --track ~/Music/track2.flac
+
 # Single virtual CDJ (M0 behaviour; mostly for debugging):
 ./target/debug/cdjd run --iface en0 --device-number 1 --model CDJ-3000
 ```
@@ -63,7 +76,7 @@ cargo build                # build the CLI
 Verify the broadcasts on the wire (another terminal):
 
 ```sh
-sudo tcpdump -i en0 -nn -X udp port 50000 or udp port 50002
+sudo tcpdump -i en0 -nn -X 'udp port 50000 or udp port 50001 or udp port 50002'
 ```
 
 You should see:
@@ -72,6 +85,7 @@ You should see:
 - Short bursts of 44/50/38-byte packets on :50000 at startup (claim stages 1/2/3).
 - 212-byte packets on :50002 every ~200 ms per CDJ (CDJ status, kind `0x0a`).
 - 56-byte packets on :50002 every ~200 ms from the DJM (kind `0x29`).
+- With `--autoplay`: 96-byte packets on :50001 at the BPM cadence per CDJ (beat, kind `0x28`).
 
 All packets start with the `Qspt1WmJOL` magic
 (`51 73 70 74 31 57 6d 4a 4f 4c`).
@@ -95,7 +109,10 @@ Full milestone breakdown in [discovery.md §8](discovery.md). Summary:
 
 - **M0** - Pro DJ Link packet codec + single-CDJ announce loop. **Done.**
 - **M1** - 4 players + 1 mixer fleet; claim dance; idle CDJ/DJM status; `feth` helper. **Done.**
-- **M2** - Audio decode + time-stretch + phase-locked beat emission on :50001.
+- **M2.1** - Beat packets on :50001, phase-locked `BeatClock`, `PlayerState` actor. **Done.**
+- **M2.2** - Audio decode (Symphonia) + CPAL playback per player, shared playhead. **Done.**
+- **M2.3** - Phase-lock beat clock to audio playhead; track beat-grid extraction (aubio).
+- **M2.4** - Virtual DJM mix bus (sum players - single output); crossfader / EQ / on-air flags.
 - **M3** - Per-player track storage (upload / USB passthrough), minimum-viable `export.pdb`.
 - **M4** - In-process NFSv2 server + dbserver (TCP 1051).
 - **M5** - **ShowKontrol validation:** the real deliverable.

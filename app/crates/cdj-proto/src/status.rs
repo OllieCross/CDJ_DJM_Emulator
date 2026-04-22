@@ -47,6 +47,8 @@ pub struct CdjStatus {
     pub on_air: bool,
     /// Monotonically-increasing packet counter; wraps u32.
     pub packet_counter: u32,
+    /// Position in the 4-beat bar (1..=4), used by sync-aware clients.
+    pub beat_within_bar: u8,
 }
 
 impl CdjStatus {
@@ -59,6 +61,7 @@ impl CdjStatus {
             master: false,
             on_air: false,
             packet_counter: 0,
+            beat_within_bar: 1,
         }
     }
 
@@ -95,6 +98,7 @@ impl CdjStatus {
         buf[89] = flags;
         let bpm = encode_bpm_u16(self.bpm_hundredths);
         buf[90..92].copy_from_slice(&bpm);
+        buf[92] = self.beat_within_bar.clamp(1, 4);
         buf[0xc8..0xc8 + 4].copy_from_slice(&self.packet_counter.to_be_bytes());
 
         buf
@@ -121,6 +125,7 @@ impl CdjStatus {
             on_air: flags & 0x08 != 0,
             master: flags & 0x20 != 0,
             packet_counter: u32::from_be_bytes(ctr),
+            beat_within_bar: buf[92].max(1).min(4),
         })
     }
 }
@@ -203,6 +208,7 @@ mod tests {
             master: false,
             on_air: true,
             packet_counter: 0xdead_beef,
+            beat_within_bar: 3,
         };
         let bytes = s.encode();
         assert_eq!(bytes.len(), CDJ_STATUS_LEN);
