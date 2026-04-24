@@ -1,25 +1,22 @@
 //! Helper for setting up macOS `feth` virtual ethernet interface pairs.
 //!
-//! Because a single Mac has one Wi-Fi / ethernet NIC and ShowKontrol wants
-//! broadcast traffic (which does not flow across `lo0`), we create a pair of
-//! `feth` interfaces (Apple's in-kernel fake-ethernet) with a link-local
-//! subnet. The emulator binds to one, ShowKontrol to the other — or both bind
-//! to the same one; either works because feth broadcasts are visible to every
-//! listener on the pair.
+//! Creates a feth pair on a /24 subnet. feth0 hosts the emulator with one IP
+//! alias per virtual device (last octet = device number: .1-.4 for CDJs, .33
+//! for DJM). feth1 is the client-app interface (ShowKontrol/BLT at .200).
 //!
-//! `feth` is only configurable via `ifconfig` and requires `sudo`. Rather than
-//! invoking sudo ourselves (and prompting the user mid-run), we emit the
-//! commands so the user can review and run them.
+//! Each device needs a unique source IP so Pro DJ Link clients like ShowKontrol
+//! can distinguish them - real CDJs each have a distinct IP address.
+//!
+//! `feth` requires `sudo`. We emit the commands for the user to review and run.
 //!
 //! Usage:
 //!
 //! ```no_run
-//! let plan = cdj_core::feth::setup_plan("feth0", "feth1", "169.254.77.1", "169.254.77.2", 24);
+//! let plan = cdj_core::feth::setup_plan("feth0", "feth1", "10.77.77.1", "10.77.77.200", 24);
 //! for line in plan.commands() { println!("{line}"); }
 //! ```
 
-/// A ready-to-run shell plan to create a `feth` pair, bring both up, assign
-/// IPs, and bond them.
+/// A ready-to-run shell plan to create a `feth` pair for the emulator.
 pub struct FethPlan {
     pub a_name: String,
     pub b_name: String,
@@ -45,22 +42,60 @@ pub fn setup_plan(
 }
 
 impl FethPlan {
-    /// Shell commands to run (as root) to bring the pair up.
+    /// Shell commands to bring the pair up.
+    ///
+    /// feth0 gets the primary emulator IP plus alias IPs for each virtual
+    /// device (CDJ 1-4 at .1-.4, DJM at .33). feth1 gets the client-app IP
+    /// (.200 by default). The single /24 route is via feth1 so ShowKontrol can
+    /// broadcast; emulator sockets use SO_DONTROUTE to bypass that route.
     pub fn commands(&self) -> Vec<String> {
         let mask = prefix_to_mask(self.prefix);
-        vec![
+        let net = network_addr(&self.a_ip, self.prefix);
+
+        // Derive alias IPs from the primary a_ip: same first 3 octets.
+        let prefix3 = self.a_ip.rsplitn(2, '.').nth(1).unwrap_or("10.77.77");
+
+        let cmds = vec![
             format!("sudo ifconfig {} create", self.a_name),
             format!("sudo ifconfig {} create", self.b_name),
             format!("sudo ifconfig {} peer {}", self.a_name, self.b_name),
+            // Primary IP for feth0 (CDJ 1 + base interface address).
             format!(
                 "sudo ifconfig {} inet {} netmask {} up",
                 self.a_name, self.a_ip, mask
             ),
+            // Alias IPs for CDJ 2, 3, 4, and DJM - each gets a unique source IP.
+            format!(
+                "sudo ifconfig {} inet alias {}.2 netmask {} up",
+                self.a_name, prefix3, mask
+            ),
+            format!(
+                "sudo ifconfig {} inet alias {}.3 netmask {} up",
+                self.a_name, prefix3, mask
+            ),
+            format!(
+                "sudo ifconfig {} inet alias {}.4 netmask {} up",
+                self.a_name, prefix3, mask
+            ),
+            format!(
+                "sudo ifconfig {} inet alias {}.33 netmask {} up",
+                self.a_name, prefix3, mask
+            ),
+            // Client-app interface (ShowKontrol / BLT).
             format!(
                 "sudo ifconfig {} inet {} netmask {} up",
                 self.b_name, self.b_ip, mask
             ),
-        ]
+            // Only one route per subnet on macOS. Delete the auto-added feth0
+            // connected route and add a feth1 route so the client app can send.
+            // Emulator uses SO_DONTROUTE so it doesn't need this route.
+            format!("sudo route -q delete -net {}/{} 2>/dev/null; true", net, self.prefix),
+            format!(
+                "sudo route -q add -net {}/{} -interface {}",
+                net, self.prefix, self.b_name
+            ),
+        ];
+        cmds
     }
 
     /// Commands to tear down the pair.
@@ -70,6 +105,18 @@ impl FethPlan {
             format!("sudo ifconfig {} destroy", self.b_name),
         ]
     }
+}
+
+fn network_addr(ip: &str, prefix: u8) -> String {
+    let parts: Vec<u32> = ip.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    if parts.len() != 4 {
+        return ip.to_string();
+    }
+    let ip_u32 = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+    let mask_bits = if prefix == 0 { 0u32 } else { u32::MAX << (32 - prefix as u32) };
+    let net = ip_u32 & mask_bits;
+    let b = net.to_be_bytes();
+    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
 }
 
 fn prefix_to_mask(prefix: u8) -> String {
@@ -98,9 +145,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_emits_five_commands() {
-        let p = setup_plan("feth0", "feth1", "169.254.77.1", "169.254.77.2", 24);
-        assert_eq!(p.commands().len(), 5);
+    fn plan_emits_correct_command_count() {
+        let p = setup_plan("feth0", "feth1", "10.77.77.1", "10.77.77.200", 24);
+        // create×2, peer, primary IP, 4 alias IPs, feth1 IP, route delete, route add
+        assert_eq!(p.commands().len(), 11);
         assert_eq!(p.teardown_commands().len(), 2);
     }
 }

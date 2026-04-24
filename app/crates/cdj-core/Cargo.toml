@@ -17,3 +17,5 @@ cpal = { workspace = true }
 symphonia = { workspace = true }
 ringbuf = { workspace = true }
 crossbeam-channel = { workspace = true }
+socket2 = { workspace = true }
+libc = { workspace = true }

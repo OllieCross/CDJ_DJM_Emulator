@@ -24,3 +24,5 @@ cpal = "0.15"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "wav", "alac", "pcm"] }
 ringbuf = "0.4"
 crossbeam-channel = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"

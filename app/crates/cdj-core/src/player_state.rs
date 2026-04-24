@@ -15,12 +15,17 @@ pub struct PlayerState {
     /// Ordinal of the next beat to fire; used by the beat clock to keep the
     /// bar counter and (eventually) audio playhead in sync.
     next_beat_ordinal: AtomicU32,
-    /// Frames of audio output so far (monotonic). Updated by the audio engine
-    /// from its CPAL output callback; read by any code that needs a
-    /// sample-accurate playhead (phase-locked beat clock, UI).
+    /// Frames of audio output so far (monotonic, device output domain).
+    /// Updated by the audio engine from its CPAL output callback.
     playhead_frames: AtomicU64,
-    /// Sample rate of the loaded track in Hz. Zero when no track is loaded.
+    /// Device output sample rate in Hz (matches `playhead_frames`' domain).
+    /// Zero when no track is loaded; the beat clock uses that as "no
+    /// playhead - fall back to wall-clock mode".
     sample_rate: AtomicU32,
+    /// Musical offset of beat 1 of bar 1 from the start of playback, in
+    /// milliseconds. Typically comes from a rekordbox beat-grid; user-
+    /// supplied via `--beat-offset-ms` for M2.3.
+    beat_grid_offset_ms: AtomicU32,
 }
 
 impl PlayerState {
@@ -34,6 +39,7 @@ impl PlayerState {
             next_beat_ordinal: AtomicU32::new(0),
             playhead_frames: AtomicU64::new(0),
             sample_rate: AtomicU32::new(0),
+            beat_grid_offset_ms: AtomicU32::new(0),
         }
     }
 
@@ -103,5 +109,20 @@ impl PlayerState {
 
     pub fn set_sample_rate(&self, rate: u32) {
         self.sample_rate.store(rate, Ordering::Relaxed);
+    }
+
+    pub fn beat_grid_offset_ms(&self) -> u32 {
+        self.beat_grid_offset_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_beat_grid_offset_ms(&self, ms: u32) {
+        self.beat_grid_offset_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Set the bar-position directly (used by the beat clock in phase-locked
+    /// mode, where position is derived from the audio playhead rather than a
+    /// local counter).
+    pub fn set_beat_within_bar(&self, b: u8) {
+        self.beat_within_bar.store(b.max(1).min(4), Ordering::Relaxed);
     }
 }

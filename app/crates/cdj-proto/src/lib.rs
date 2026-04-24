@@ -20,6 +20,7 @@
 pub mod announce;
 pub mod beat;
 pub mod claim;
+pub mod dbserver;
 pub mod error;
 pub mod header;
 pub mod status;

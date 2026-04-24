@@ -25,9 +25,9 @@ enum Cmd {
         a: String,
         #[arg(long, default_value = "feth1")]
         b: String,
-        #[arg(long, default_value = "169.254.77.1")]
+        #[arg(long, default_value = "10.77.77.1")]
         a_ip: String,
-        #[arg(long, default_value = "169.254.77.2")]
+        #[arg(long, default_value = "10.77.77.200")]
         b_ip: String,
         #[arg(long, default_value_t = 24)]
         prefix: u8,
@@ -60,6 +60,10 @@ enum Cmd {
         /// track stay idle.
         #[arg(long = "track")]
         tracks: Vec<std::path::PathBuf>,
+        /// Offset from playback start to the first beat of bar 1, in ms.
+        /// Applies to every loaded track. Per-track beat grids arrive with M3.
+        #[arg(long, default_value_t = 0)]
+        beat_offset_ms: u32,
     },
 
     /// Run a single virtual CDJ (M0-style helper).
@@ -129,6 +133,7 @@ async fn main() -> Result<()> {
             bpm,
             autoplay,
             tracks,
+            beat_offset_ms,
         } => {
             let iface = Interface::by_name(&iface)
                 .with_context(|| format!("resolving interface {iface}"))?;
@@ -142,6 +147,7 @@ async fn main() -> Result<()> {
                 initial_bpm_hundredths: bpm_to_hundredths(bpm),
                 autoplay,
                 tracks,
+                beat_grid_offset_ms: beat_offset_ms,
             };
             Fleet::new(cfg).run().await?;
         }
@@ -161,6 +167,7 @@ async fn main() -> Result<()> {
                 initial_bpm_hundredths: 12000,
                 autoplay: false,
                 tracks: Vec::new(),
+                beat_grid_offset_ms: 0,
             };
             Fleet::new(cfg).run().await?;
         }

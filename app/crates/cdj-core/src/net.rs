@@ -2,7 +2,9 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
+use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
+
 use tokio::net::UdpSocket;
 
 pub const PORT_ANNOUNCE: u16 = 50000;
@@ -84,19 +86,39 @@ impl Interface {
     }
 }
 
-/// Bind a UDP socket on the given interface's IPv4 + port, with broadcast
-/// enabled. Using `0.0.0.0` as the bind address (not the interface IP) lets us
-/// receive directed and broadcast traffic on that port regardless of source
-/// subnet — real CDJs are not picky about which interface announcements arrive
-/// on.
-pub async fn bind_broadcast(port: u16) -> std::io::Result<UdpSocket> {
-    let sock = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-        Ipv4Addr::UNSPECIFIED,
-        port,
-    )))
-    .await?;
+/// Create a UDP send socket bound to `local_ip:0` (OS-assigned ephemeral port)
+/// with broadcast enabled.
+///
+/// `SO_DONTROUTE` is set so sends bypass the routing table and go directly out
+/// the interface that owns `local_ip`. This is required on macOS when using a
+/// `feth` pair: we delete the emulator-side connected route so BLT can hold the
+/// only route for the /30 subnet, and without `SO_DONTROUTE` the kernel returns
+/// EHOSTUNREACH on the very first send.
+pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Result<UdpSocket> {
+    let _ = iface_name;
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_broadcast(true)?;
-    Ok(sock)
+    // SO_DONTROUTE bypasses the routing table and sends directly via the interface
+    // that owns local_ip. Required on macOS with a feth pair where the emulator's
+    // connected route is deleted so BLT can hold the only route for the subnet.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let val: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_DONTROUTE,
+                &val as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    sock.set_nonblocking(true)?;
+    sock.bind(&SocketAddr::V4(SocketAddrV4::new(local_ip, 0)).into())?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    UdpSocket::from_std(std_sock)
 }
 
 pub fn broadcast_addr(iface: &Interface, port: u16) -> SocketAddr {

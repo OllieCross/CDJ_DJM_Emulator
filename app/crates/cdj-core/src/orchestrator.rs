@@ -1,18 +1,19 @@
 //! Fleet orchestrator: run N virtual CDJs + 1 virtual DJM in a single process.
 //!
-//! All devices share three UDP sockets (one per Pro DJ Link port) with
-//! broadcast enabled. Packets still carry per-device MAC and IP in their
-//! payloads, which is what the Pro DJ Link protocol keys off.
+//! Each device gets its own set of UDP sockets bound to its own IP address
+//! (last octet = device number). Real CDJs have unique IPs; Pro DJ Link clients
+//! like ShowKontrol use source IP to identify devices, so sharing an IP causes
+//! all devices to collapse into one row.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use cdj_proto::DeviceName;
-use tokio::net::UdpSocket;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::net::{bind_broadcast, Interface, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS};
+use crate::dbserver::{DbServer, DbServerConfig};
+use crate::net::{bind_sender, Interface};
 use crate::player_state::PlayerState;
 use crate::virtual_cdj::{VirtualCdj, VirtualCdjConfig};
 use crate::virtual_djm::{VirtualDjm, VirtualDjmConfig};
@@ -32,6 +33,10 @@ pub struct FleetConfig {
     /// Optional track files, assigned sequentially to player 1, 2, 3, 4.
     /// Empty slots leave the corresponding player idle.
     pub tracks: Vec<Option<PathBuf>>,
+    /// Beat-grid offset in milliseconds applied to every loaded track.
+    /// Controls where beat 1 of bar 1 lands relative to playback start.
+    /// Comes from `--beat-offset-ms`; per-track beat grids arrive with M3.
+    pub beat_grid_offset_ms: u32,
 }
 
 impl FleetConfig {
@@ -45,6 +50,7 @@ impl FleetConfig {
             initial_bpm_hundredths: 12000,
             autoplay: false,
             tracks: Vec::new(),
+            beat_grid_offset_ms: 0,
         }
     }
 }
@@ -70,9 +76,8 @@ impl Fleet {
         let _ = DeviceName::new(&self.cfg.mixer_model)
             .map_err(|e| anyhow::anyhow!("mixer_model invalid: {e}"))?;
 
-        let announce_sock: Arc<UdpSocket> = Arc::new(bind_broadcast(PORT_ANNOUNCE).await?);
-        let beat_sock: Arc<UdpSocket> = Arc::new(bind_broadcast(PORT_BEAT).await?);
-        let status_sock: Arc<UdpSocket> = Arc::new(bind_broadcast(PORT_STATUS).await?);
+        let base = self.cfg.iface.ipv4.octets();
+        let name = self.cfg.iface.name.as_str();
 
         info!(
             iface = %self.cfg.iface.name,
@@ -90,10 +95,17 @@ impl Fleet {
             let mut mac = self.cfg.iface.mac;
             mac[5] = mac[5].wrapping_add(n);
 
+            // Each virtual CDJ gets a unique IP (last octet = device number) so
+            // that Pro DJ Link clients can distinguish devices by source address.
+            let mut device_ip_octets = base;
+            device_ip_octets[3] = n;
+            let device_ip = std::net::Ipv4Addr::from(device_ip_octets);
+
             let state = Arc::new(PlayerState::new(self.cfg.initial_bpm_hundredths));
             if self.cfg.autoplay {
                 state.set_playing(true);
             }
+            state.set_beat_grid_offset_ms(self.cfg.beat_grid_offset_ms);
 
             let track = self
                 .cfg
@@ -101,54 +113,55 @@ impl Fleet {
                 .get(n as usize - 1)
                 .cloned()
                 .flatten();
+
+            let announce_sock = Arc::new(bind_sender(device_ip, name).await?);
+            let beat_sock = Arc::new(bind_sender(device_ip, name).await?);
+            let status_sock = Arc::new(bind_sender(device_ip, name).await?);
+
             let cfg = VirtualCdjConfig {
                 model_name: self.cfg.player_model.clone(),
                 device_number: n,
                 iface: self.cfg.iface.clone(),
                 mac,
-                ip: self.cfg.iface.ipv4.octets(),
+                ip: device_ip_octets,
                 track,
             };
-            let cdj = VirtualCdj::new(
-                cfg,
-                announce_sock.clone(),
-                beat_sock.clone(),
-                status_sock.clone(),
-                state,
-            );
+            let cdj = VirtualCdj::new(cfg, announce_sock, beat_sock, status_sock, state.clone());
             tasks.spawn(async move { cdj.run().await });
+
+            // Each virtual CDJ also hosts a dbserver on its own IP so clients
+            // (ShowKontrol, rekordbox) can fetch per-deck track metadata. The
+            // TCP port is fixed at 1051 and advertised via the UDP 12523
+            // port-discovery handshake.
+            let db_cfg = DbServerConfig {
+                device_number: n,
+                ip: device_ip,
+                player_model: self.cfg.player_model.clone(),
+            };
+            let db = DbServer::new(db_cfg, state);
+            tasks.spawn(async move { db.run().await });
         }
 
         if self.cfg.include_mixer {
             let mut mac = self.cfg.iface.mac;
             mac[5] = mac[5].wrapping_add(33);
+
+            // DJM gets last octet 33, matching its device number.
+            let mut djm_ip_octets = base;
+            djm_ip_octets[3] = 33;
+            let djm_ip = std::net::Ipv4Addr::from(djm_ip_octets);
+
+            let djm_announce_sock = Arc::new(bind_sender(djm_ip, name).await?);
+            let djm_status_sock = Arc::new(bind_sender(djm_ip, name).await?);
+
             let cfg = VirtualDjmConfig {
                 model_name: self.cfg.mixer_model.clone(),
                 iface: self.cfg.iface.clone(),
                 mac,
-                ip: self.cfg.iface.ipv4.octets(),
+                ip: djm_ip_octets,
             };
-            let djm = VirtualDjm::new(cfg, announce_sock.clone(), status_sock.clone());
+            let djm = VirtualDjm::new(cfg, djm_announce_sock, djm_status_sock);
             tasks.spawn(async move { djm.run().await });
-        }
-
-        // Passive receiver on :50000 for debugging / future dispatcher.
-        {
-            let sock = announce_sock.clone();
-            tasks.spawn(async move {
-                let mut buf = [0u8; 1500];
-                loop {
-                    match sock.recv_from(&mut buf).await {
-                        Ok((n, src)) => {
-                            tracing::trace!(bytes = n, from = %src, "rx :50000");
-                        }
-                        Err(e) => {
-                            warn!("announce recv: {e}");
-                            return Err(e.into());
-                        }
-                    }
-                }
-            });
         }
 
         while let Some(result) = tasks.join_next().await {

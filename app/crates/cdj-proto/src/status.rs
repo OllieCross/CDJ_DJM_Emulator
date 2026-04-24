@@ -67,39 +67,53 @@ impl CdjStatus {
 
     pub fn encode(&self) -> [u8; CDJ_STATUS_LEN] {
         let mut buf = [0u8; CDJ_STATUS_LEN];
-        // Header: magic, kind=0x0a, 0x00, name
         Header {
-            kind: PacketKind::Announce, // same kind byte 0x0a
+            kind: PacketKind::Announce, // CDJ status shares kind 0x0a with announce
             device_name: self.device_name.clone(),
         }
         .encode_into(&mut buf[..Header::ENCODED_LEN])
         .unwrap();
 
-        let mut i = Header::ENCODED_LEN;
-        buf[i] = 0x01; // sub-type marker
-        i += 1;
-        buf[i] = 0x03; // TODO: verify CDJ-3000 subtype against pcap
-        i += 1;
-        buf[i..i + 2].copy_from_slice(&(CDJ_STATUS_LEN as u16).to_be_bytes());
-        i += 2;
+        let mut i = Header::ENCODED_LEN; // i = 32
+        buf[i] = 0x01; i += 1; // 32: sub-type
+        buf[i] = 0x03; i += 1; // 33: sub-type detail
+        buf[i..i + 2].copy_from_slice(&(CDJ_STATUS_LEN as u16).to_be_bytes()); i += 2;
         buf[i] = self.device_number; // 36
-        // Payload follows with many fields we do not yet decode. Key offsets
-        // below are drawn from the beat-link Java parser; all others zero.
-        //
-        // offsets within payload (from byte 37..end):
-        //   37    activity (0=idle, 1=playing)  -- used as a heartbeat flag
-        //   89    flags byte: bit0=playing, bit5=master, bit3=on_air
-        //   90    bpm (u16 BE, hundredths)
-        //   0xc8  packet counter (u32 BE)
-        //
-        // Everything else we leave as zero for now; beat-link tolerates that.
-        buf[37] = if self.playing { 1 } else { 0 };
-        let flags = (self.playing as u8) | ((self.on_air as u8) << 3) | ((self.master as u8) << 5);
-        buf[89] = flags;
-        let bpm = encode_bpm_u16(self.bpm_hundredths);
-        buf[90..92].copy_from_slice(&bpm);
-        buf[92] = self.beat_within_bar.clamp(1, 4);
-        buf[0xc8..0xc8 + 4].copy_from_slice(&self.packet_counter.to_be_bytes());
+
+        // Offsets verified against beat-link CdjStatus.java (CDJ-3000, 212-byte packet).
+        buf[37] = if self.playing { 1 } else { 0 }; // activity: 1 = USB present
+
+        // Track source: fake a USB rekordbox track so clients show LOADED not UNLOADED.
+        // USB_SLOT=3, REKORDBOX=1. Rekordbox ID uses device_number (unique per deck).
+        buf[0x29] = 3; // 41: source slot: USB_SLOT
+        buf[0x2A] = 1; // 42: track type: REKORDBOX
+        buf[0x2C..0x30].copy_from_slice(&(self.device_number as u32).to_be_bytes()); // 44-47
+
+        // PlayState1 (0x7B = 123): PLAYING=3, PAUSED=5. Tells clients track is loaded.
+        buf[0x7B] = if self.playing { 3 } else { 5 };
+
+        // Status flags at 0x89 (137): bit6=playing, bit5=master, bit3=on-air.
+        let flags = ((self.playing as u8) << 6)
+            | ((self.master as u8) << 5)
+            | ((self.on_air as u8) << 3);
+        buf[0x89] = flags;
+
+        // Pitch at 0x8D (141), 3 bytes BE. 0x100000 = neutral (1× speed).
+        // Effective BPM = bpm * (pitch / 0x100000). Zero pitch gives BPM = 0.
+        buf[0x8D..0x90].copy_from_slice(&[0x10, 0x00, 0x00]);
+        // Three redundant pitch copies; clients may read any of them.
+        buf[153..156].copy_from_slice(&[0x10, 0x00, 0x00]);
+        buf[193..196].copy_from_slice(&[0x10, 0x00, 0x00]);
+        buf[197..200].copy_from_slice(&[0x10, 0x00, 0x00]);
+
+        // BPM at 0x92 (146), 2 bytes BE, in hundredths (120.00 = 12000).
+        buf[0x92..0x94].copy_from_slice(&encode_bpm_u16(self.bpm_hundredths));
+
+        // Beat within bar at 0xA6 (166).
+        buf[0xA6] = self.beat_within_bar.clamp(1, 4);
+
+        // Packet counter at 0xC8 (200), 4 bytes BE.
+        buf[0xC8..0xCC].copy_from_slice(&self.packet_counter.to_be_bytes());
 
         buf
     }
@@ -113,19 +127,19 @@ impl CdjStatus {
         }
         let header = Header::decode(buf)?;
         let device_number = buf[36];
-        let flags = buf[89];
-        let bpm_hundredths = u16::from_be_bytes([buf[90], buf[91]]);
+        let flags = buf[0x89]; // 137
+        let bpm_hundredths = u16::from_be_bytes([buf[0x92], buf[0x93]]); // 146-147
         let mut ctr = [0u8; 4];
-        ctr.copy_from_slice(&buf[0xc8..0xc8 + 4]);
+        ctr.copy_from_slice(&buf[0xC8..0xCC]);
         Ok(Self {
             device_name: header.device_name,
             device_number,
             bpm_hundredths,
-            playing: flags & 0x01 != 0,
-            on_air: flags & 0x08 != 0,
-            master: flags & 0x20 != 0,
+            playing: flags & 0x40 != 0, // bit6
+            on_air: flags & 0x08 != 0,  // bit3
+            master: flags & 0x20 != 0,  // bit5
             packet_counter: u32::from_be_bytes(ctr),
-            beat_within_bar: buf[92].max(1).min(4),
+            beat_within_bar: buf[0xA6].max(1).min(4), // 166
         })
     }
 }

@@ -112,7 +112,6 @@ fn run_engine(
         frames = track.samples.len() / track.channels as usize,
         "track decoded"
     );
-    state.set_sample_rate(track.source_rate);
     state.set_playhead_frames(0);
 
     let host = cpal::default_host();
@@ -146,6 +145,11 @@ fn run_engine(
         sample_format = ?sample_format,
         "opening CPAL output stream"
     );
+
+    // Playhead is advanced in device output frames by the CPAL callback, so
+    // the atomic `sample_rate` needs to match that domain - not the source
+    // file's rate - for the beat clock's playhead-driven math to work.
+    state.set_sample_rate(device_rate);
 
     let stream = match build_stream(&device, &config, sample_format, track, state) {
         Ok(s) => s,
@@ -377,7 +381,10 @@ mod tests {
     #[test]
     fn nonexistent_file_errors_cleanly() {
         let state = Arc::new(PlayerState::new(12000));
-        let err = AudioHandle::spawn(PathBuf::from("/nonexistent/path.flac"), state).unwrap_err();
+        let err = match AudioHandle::spawn(PathBuf::from("/nonexistent/path.flac"), state) {
+            Ok(_) => panic!("expected error for missing file"),
+            Err(e) => e,
+        };
         let msg = format!("{err:#}");
         assert!(msg.contains("opening track"), "got: {msg}");
     }
