@@ -24,7 +24,7 @@ use cdj_proto::dbserver::{
     MSG_MENU_ITEM, MSG_REKORDBOX_METADATA_REQ, MSG_SETUP_REQ,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, trace, warn};
 
 use crate::player_state::PlayerState;
@@ -59,50 +59,60 @@ impl DbServer {
     pub async fn run(self) -> anyhow::Result<()> {
         let Self { cfg, state } = self;
 
-        let udp_fut = run_port_discovery(cfg.ip, DBSERVER_TCP_PORT, cfg.device_number);
+        let discovery_fut = run_port_discovery(cfg.ip, DBSERVER_TCP_PORT, cfg.device_number);
         let tcp_fut = run_tcp_listener(cfg.clone(), state);
 
         tokio::select! {
-            r = udp_fut => r,
+            r = discovery_fut => r,
             r = tcp_fut => r,
         }
     }
 }
 
+/// TCP port-discovery listener. Beat-link / ShowKontrol open a fresh TCP
+/// connection to port 12523, send the 19-byte "RemoteDBServer" query, and
+/// expect a 2-byte big-endian port number back. (An earlier version did UDP
+/// here; that's wrong - clients never send UDP and silently give up after
+/// 4 retries, leaving the deck without a known dbserver port and skipping
+/// metadata fetches entirely.)
 async fn run_port_discovery(
     ip: Ipv4Addr,
     tcp_port: u16,
     device_number: u8,
 ) -> anyhow::Result<()> {
-    // Plain UDP bind. No SO_DONTROUTE: replies go via the kernel route table
-    // (through feth1 for the /24 route we set up). An earlier attempt used
-    // DONTROUTE here like the broadcast senders do, but ARP for unicast
-    // across the feth peer fails with ENETUNREACH on macOS.
-    let sock = UdpSocket::bind(SocketAddrV4::new(ip, PORT_DISCOVERY_PORT)).await?;
+    let listener = TcpListener::bind(SocketAddrV4::new(ip, PORT_DISCOVERY_PORT)).await?;
     info!(
         num = device_number,
-        addr = %sock.local_addr()?,
-        "dbserver port-discovery listening"
+        addr = %listener.local_addr()?,
+        "dbserver port-discovery listening (tcp)"
     );
     let reply = port_discovery::reply(tcp_port);
-    let mut buf = [0u8; 64];
     loop {
-        let (n, peer) = sock.recv_from(&mut buf).await?;
-        let pkt = &buf[..n];
-        if port_discovery::is_query(pkt) {
-            if let Err(e) = sock.send_to(&reply, peer).await {
-                warn!(num = device_number, "port-discovery reply failed: {e}");
-            } else {
-                debug!(num = device_number, %peer, "port-discovery replied 1051");
+        let (mut stream, peer) = listener.accept().await?;
+        let reply = reply;
+        tokio::spawn(async move {
+            let mut buf = [0u8; 19];
+            match stream.read_exact(&mut buf).await {
+                Ok(_) if port_discovery::is_query(&buf) => {
+                    if let Err(e) = stream.write_all(&reply).await {
+                        warn!(num = device_number, %peer, "port-discovery reply failed: {e}");
+                    } else {
+                        debug!(num = device_number, %peer, "port-discovery replied 1051");
+                    }
+                }
+                Ok(_) => {
+                    trace!(
+                        num = device_number,
+                        %peer,
+                        bytes = ?buf,
+                        "port-discovery: unknown query"
+                    );
+                }
+                Err(e) => {
+                    debug!(num = device_number, %peer, "port-discovery read failed: {e}");
+                }
             }
-        } else {
-            trace!(
-                num = device_number,
-                %peer,
-                bytes = ?pkt,
-                "port-discovery: unknown query"
-            );
-        }
+        });
     }
 }
 
@@ -202,11 +212,15 @@ async fn handle_message(
     match msg.message_type {
         MSG_SETUP_REQ => {
             // Client tells us its player number; we confirm with MENU_AVAILABLE.
-            // Args convention (per beat-link): echo the request type + our count.
+            // Second arg is the server's own player number; clients verify this
+            // against the deck they're querying, so it must reflect this CDJ.
             let reply = Message::new(
                 msg.transaction_id,
                 MSG_MENU_AVAILABLE,
-                vec![Field::Number4(MSG_SETUP_REQ as u32), Field::Number4(1)],
+                vec![
+                    Field::Number4(MSG_SETUP_REQ as u32),
+                    Field::Number4(cfg.device_number as u32),
+                ],
             );
             stream.write_all(&reply.encode()).await?;
             debug!(num = cfg.device_number, "dbserver: handled SETUP_REQ");

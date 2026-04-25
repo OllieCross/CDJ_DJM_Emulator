@@ -95,15 +95,21 @@ impl Interface {
 /// only route for the /30 subnet, and without `SO_DONTROUTE` the kernel returns
 /// EHOSTUNREACH on the very first send.
 pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Result<UdpSocket> {
-    let _ = iface_name;
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_broadcast(true)?;
-    // SO_DONTROUTE bypasses the routing table and sends directly via the interface
-    // that owns local_ip. Required on macOS with a feth pair where the emulator's
-    // connected route is deleted so BLT can hold the only route for the subnet.
+    // On macOS the feth-plan deletes the connected route for our subnet so the
+    // client app (BLT/ShowKontrol) holds the only route via feth1. We need to
+    // force every send out of feth0 anyway, including unicast to peers on the
+    // same subnet (e.g. 10.77.77.200) - SO_DONTROUTE alone returns ENETUNREACH
+    // for unicast because the kernel can't resolve the destination without a
+    // route. IP_BOUND_IF (macOS/iOS) pins the socket to feth0 directly,
+    // bypassing the route table for both broadcast and unicast.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
+        // SO_DONTROUTE: bypass the route table. With the feth-plan setup the
+        // connected /24 route is removed (so the client app can hold the only
+        // route via feth1), and broadcasts already worked via DONTROUTE.
         let val: libc::c_int = 1;
         unsafe {
             libc::setsockopt(
@@ -115,6 +121,36 @@ pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Resul
             );
         }
     }
+    // On macOS additionally pin the outgoing interface with IP_BOUND_IF. With
+    // DONTROUTE alone, broadcast sends work but unicast to subnet peers (e.g.
+    // 10.77.77.200) returns ENETUNREACH because there is no connected route to
+    // resolve the destination. IP_BOUND_IF tells the kernel "always send out
+    // this interface", which makes unicast across the feth peer succeed.
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::io::AsRawFd;
+        const IP_BOUND_IF: libc::c_int = 25;
+        let cname = CString::new(iface_name).expect("iface_name has no NUL");
+        let idx: libc::c_uint = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+        if idx == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        unsafe {
+            let r = libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                IP_BOUND_IF,
+                &idx as *const libc::c_uint as *const libc::c_void,
+                std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
+            );
+            if r != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = iface_name;
     sock.set_nonblocking(true)?;
     sock.bind(&SocketAddr::V4(SocketAddrV4::new(local_ip, 0)).into())?;
     let std_sock: std::net::UdpSocket = sock.into();

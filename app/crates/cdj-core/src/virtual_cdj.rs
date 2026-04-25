@@ -133,7 +133,17 @@ impl VirtualCdj {
 
         {
             let sock = self.status_sock.clone();
-            let dest = broadcast_addr(&self.cfg.iface, PORT_STATUS);
+            let bcast = broadcast_addr(&self.cfg.iface, PORT_STATUS);
+            // Beat-link binds VirtualCdj to a specific local IP (matched feth1
+            // address) on port 50002, and macOS won't deliver subnet broadcasts
+            // to IP-specific UDP sockets - so status packets sent only to
+            // 10.77.77.255 never reach MetadataFinder/TimeFinder. We also
+            // unicast to the feth1 peer at .200 so beat-link's bound socket
+            // sees the packet directly.
+            let unicast = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::new(10, 77, 77, 200),
+                PORT_STATUS,
+            ));
             let name = device_name.clone();
             let num = self.cfg.device_number;
             let state = self.state.clone();
@@ -155,8 +165,11 @@ impl VirtualCdj {
                         beat_within_bar: state.beat_within_bar(),
                     };
                     let bytes = status.encode();
-                    if let Err(e) = sock.send_to(&bytes, dest).await {
-                        tracing::warn!("CDJ status send failed: {e}");
+                    if let Err(e) = sock.send_to(&bytes, bcast).await {
+                        tracing::warn!("CDJ status broadcast failed: {e}");
+                    }
+                    if let Err(e) = sock.send_to(&bytes, unicast).await {
+                        tracing::warn!("CDJ status unicast to {unicast} failed: {e}");
                     }
                     debug!(num, ctr, "status sent");
                 }

@@ -74,17 +74,26 @@ impl CdjStatus {
         .encode_into(&mut buf[..Header::ENCODED_LEN])
         .unwrap();
 
-        let mut i = Header::ENCODED_LEN; // i = 32
-        buf[i] = 0x01; i += 1; // 32: sub-type
-        buf[i] = 0x03; i += 1; // 33: sub-type detail
-        buf[i..i + 2].copy_from_slice(&(CDJ_STATUS_LEN as u16).to_be_bytes()); i += 2;
-        buf[i] = self.device_number; // 36
+        // Header layout per beat-link DeviceUpdate.java (DEVICE_NUMBER_OFFSET = 0x21)
+        // and CdjStatus.java (payloadLength at 0x22, packet length = payloadLength + 0x24):
+        //   0x20: 0x01 sub-type marker
+        //   0x21: device number  <- beat-link's getDeviceNumber() reads here
+        //   0x22-0x23: payload length BE u16 = total - 0x24
+        //   0x24+: payload
+        buf[0x20] = 0x01;
+        buf[0x21] = self.device_number;
+        let payload_len = (CDJ_STATUS_LEN - 0x24) as u16;
+        buf[0x22..0x24].copy_from_slice(&payload_len.to_be_bytes());
 
         // Offsets verified against beat-link CdjStatus.java (CDJ-3000, 212-byte packet).
-        buf[37] = if self.playing { 1 } else { 0 }; // activity: 1 = USB present
+        buf[0x24] = self.device_number; // duplicate copy in payload, observed in real packets
+        buf[0x25] = if self.playing { 1 } else { 0 }; // activity: 1 = USB present
 
         // Track source: fake a USB rekordbox track so clients show LOADED not UNLOADED.
         // USB_SLOT=3, REKORDBOX=1. Rekordbox ID uses device_number (unique per deck).
+        // 0x28 (track source player) tells clients which player's dbserver to query
+        // for metadata; without it ShowKontrol/BLT never opens a connection to :1051.
+        buf[0x28] = self.device_number; // 40: track source player
         buf[0x29] = 3; // 41: source slot: USB_SLOT
         buf[0x2A] = 1; // 42: track type: REKORDBOX
         buf[0x2C..0x30].copy_from_slice(&(self.device_number as u32).to_be_bytes()); // 44-47
@@ -126,7 +135,7 @@ impl CdjStatus {
             });
         }
         let header = Header::decode(buf)?;
-        let device_number = buf[36];
+        let device_number = buf[0x21]; // 33 - matches beat-link DEVICE_NUMBER_OFFSET
         let flags = buf[0x89]; // 137
         let bpm_hundredths = u16::from_be_bytes([buf[0x92], buf[0x93]]); // 146-147
         let mut ctr = [0u8; 4];
