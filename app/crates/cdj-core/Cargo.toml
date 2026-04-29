@@ -19,3 +19,5 @@ ringbuf = { workspace = true }
 crossbeam-channel = { workspace = true }
 socket2 = { workspace = true }
 libc = { workspace = true }
+rekordcrate = { version = "0.3.0", default-features = false }
+binrw = { workspace = true }

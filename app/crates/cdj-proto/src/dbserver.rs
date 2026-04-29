@@ -46,11 +46,19 @@ pub const MSG_REKORDBOX_METADATA_REQ: u16 = 0x2002;
 pub const MSG_ARTWORK_REQ: u16 = 0x2003;
 pub const MSG_WAVEFORM_PREVIEW_REQ: u16 = 0x2004;
 pub const MSG_BEAT_GRID_REQ: u16 = 0x2204;
+pub const MSG_WAVEFORM_DETAIL_REQ: u16 = 0x2904;
 pub const MSG_RENDER_MENU_REQ: u16 = 0x3000;
 pub const MSG_MENU_AVAILABLE: u16 = 0x4000;
 pub const MSG_MENU_HEADER: u16 = 0x4001;
+pub const MSG_ARTWORK_RESP: u16 = 0x4002;
 pub const MSG_MENU_ITEM: u16 = 0x4101;
 pub const MSG_MENU_FOOTER: u16 = 0x4201;
+/// Response type for waveform preview data (beat-link KnownType.WAVE_PREVIEW).
+pub const MSG_WAVE_PREVIEW: u16 = 0x4402;
+/// Response type for beat grid data (beat-link KnownType.BEAT_GRID).
+pub const MSG_BEAT_GRID_RESP: u16 = 0x4602;
+/// Response type for full waveform detail data (beat-link KnownType.WAVE_DETAIL).
+pub const MSG_WAVE_DETAIL_RESP: u16 = 0x4A02;
 
 // Menu-item type bytes (argument 7 in a MENU_ITEM message).
 pub const ITEM_ALBUM: u8 = 0x02;
@@ -79,8 +87,15 @@ const ARG_TAG_BINARY: u8 = 0x03;
 /// Size of the fixed-length argument type-tag blob in the message header.
 pub const TYPE_TAG_BLOB_LEN: usize = 12;
 
-/// Bytes from `magic` through the end of the type-tag blob.
-pub const HEADER_LEN: usize = 4 + 4 + 2 + 1 + TYPE_TAG_BLOB_LEN;
+/// Bytes on the wire from the magic-tag through the end of the type-tag blob,
+/// with each header field carrying its own type tag (matching beat-link's
+/// `Message.read`):
+///   magic    : 1-byte tag 0x11 + 4 bytes        =  5
+///   txid     : 1-byte tag 0x11 + 4 bytes        =  5
+///   type     : 1-byte tag 0x10 + 2 bytes        =  3
+///   argcount : 1-byte tag 0x0f + 1 byte         =  2
+///   argtags  : 1-byte tag 0x14 + 4-byte length + 12 bytes = 17
+pub const HEADER_LEN: usize = 5 + 5 + 3 + 2 + 5 + TYPE_TAG_BLOB_LEN;
 
 /// A single typed value carried as a dbserver message argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,17 +270,29 @@ impl Message {
             "at most 12 arguments per message"
         );
         let mut buf = Vec::with_capacity(64);
+        // Each header component is itself a tagged Field on the wire (matching
+        // beat-link's Message.read which calls Field.read for every component).
+        // Magic: tagged 4-byte number.
+        buf.push(TAG_NUM4);
         buf.extend_from_slice(&MAGIC);
+        // Transaction ID: tagged 4-byte number.
+        buf.push(TAG_NUM4);
         buf.extend_from_slice(&self.transaction_id.to_be_bytes());
+        // Message type: tagged 2-byte number.
+        buf.push(TAG_NUM2);
         buf.extend_from_slice(&self.message_type.to_be_bytes());
+        // Argument count: tagged 1-byte number.
+        buf.push(TAG_NUM1);
         buf.push(self.arguments.len() as u8);
-
+        // Argument-type blob: tagged 12-byte binary field (length 12).
         let mut tags = [0u8; TYPE_TAG_BLOB_LEN];
         for (i, arg) in self.arguments.iter().enumerate() {
             tags[i] = arg.arg_tag();
         }
+        buf.push(TAG_BINARY);
+        buf.extend_from_slice(&(TYPE_TAG_BLOB_LEN as u32).to_be_bytes());
         buf.extend_from_slice(&tags);
-
+        // Arguments (each carries its own inline tag via encode_into).
         for arg in &self.arguments {
             arg.encode_into(&mut buf);
         }
@@ -273,24 +300,52 @@ impl Message {
     }
 
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), DecodeError> {
-        if buf.len() < HEADER_LEN {
-            return Err(DecodeError::TooShort {
-                need: HEADER_LEN,
-                have: buf.len(),
+        // Walk through the header by reading each tagged Field in turn. We use
+        // the same Field decoder used for arguments since the header is just a
+        // fixed sequence of Fields.
+        let mut offset = 0;
+
+        // Magic: tagged 4-byte number with the well-known magic value.
+        let (magic_field, n) = Field::decode(buf, offset)?;
+        offset += n;
+        let Field::Number4(magic_val) = magic_field else {
+            return Err(DecodeError::BadMagic {
+                got: [0u8; 10], // best-effort placeholder
             });
-        }
-        if buf[0..4] != MAGIC {
+        };
+        if magic_val.to_be_bytes() != MAGIC {
             let mut got = [0u8; 10];
-            got[..4].copy_from_slice(&buf[0..4]);
+            got[..4].copy_from_slice(&magic_val.to_be_bytes());
             return Err(DecodeError::BadMagic { got });
         }
-        let transaction_id = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-        let message_type = u16::from_be_bytes([buf[8], buf[9]]);
-        let argc = buf[10] as usize;
-        // buf[11..23] is the type-tag blob; we ignore it for decoding because
-        // each field carries its own inline type tag.
 
-        let mut offset = HEADER_LEN;
+        // Transaction ID: tagged 4-byte number.
+        let (txid_field, n) = Field::decode(buf, offset)?;
+        offset += n;
+        let Field::Number4(transaction_id) = txid_field else {
+            return Err(DecodeError::BadMagic { got: [0u8; 10] });
+        };
+
+        // Message type: tagged 2-byte number.
+        let (type_field, n) = Field::decode(buf, offset)?;
+        offset += n;
+        let Field::Number2(message_type) = type_field else {
+            return Err(DecodeError::BadMagic { got: [0u8; 10] });
+        };
+
+        // Argument count: tagged 1-byte number.
+        let (argc_field, n) = Field::decode(buf, offset)?;
+        offset += n;
+        let Field::Number1(argc) = argc_field else {
+            return Err(DecodeError::BadMagic { got: [0u8; 10] });
+        };
+        let argc = argc as usize;
+
+        // Argument-type blob: tagged binary field (12 bytes).
+        let (_argtypes, n) = Field::decode(buf, offset)?;
+        offset += n;
+
+        // Arguments themselves.
         let mut arguments = Vec::with_capacity(argc);
         for _ in 0..argc {
             let (field, consumed) = Field::decode(buf, offset)?;
@@ -409,15 +464,22 @@ mod tests {
     fn message_header_layout_matches_spec() {
         let m = Message::new(1, MSG_SETUP_REQ, vec![Field::Number4(1)]);
         let bytes = m.encode();
-        assert_eq!(&bytes[0..4], &MAGIC);
-        assert_eq!(&bytes[4..8], &1u32.to_be_bytes());
-        assert_eq!(&bytes[8..10], &MSG_SETUP_REQ.to_be_bytes());
-        assert_eq!(bytes[10], 1); // argc
-        // First type-tag slot = 0x06 (number), rest zero.
-        assert_eq!(bytes[11], ARG_TAG_NUMBER);
-        assert_eq!(&bytes[12..23], &[0u8; 11]);
-        // Payload: a 4-byte number field = 5 bytes.
-        assert_eq!(&bytes[23..28], &[TAG_NUM4, 0x00, 0x00, 0x00, 0x01]);
+        // Each header component is itself a tagged field.
+        assert_eq!(bytes[0], TAG_NUM4);
+        assert_eq!(&bytes[1..5], &MAGIC);
+        assert_eq!(bytes[5], TAG_NUM4);
+        assert_eq!(&bytes[6..10], &1u32.to_be_bytes());
+        assert_eq!(bytes[10], TAG_NUM2);
+        assert_eq!(&bytes[11..13], &MSG_SETUP_REQ.to_be_bytes());
+        assert_eq!(bytes[13], TAG_NUM1);
+        assert_eq!(bytes[14], 1); // argc
+        // Argument type blob: tag + 4-byte length + 12 bytes (first slot = number).
+        assert_eq!(bytes[15], TAG_BINARY);
+        assert_eq!(&bytes[16..20], &(TYPE_TAG_BLOB_LEN as u32).to_be_bytes());
+        assert_eq!(bytes[20], ARG_TAG_NUMBER);
+        assert_eq!(&bytes[21..32], &[0u8; 11]);
+        // First argument: a 4-byte number field = 5 bytes.
+        assert_eq!(&bytes[32..37], &[TAG_NUM4, 0x00, 0x00, 0x00, 0x01]);
         assert_eq!(bytes.len(), HEADER_LEN + 5);
     }
 
@@ -437,9 +499,11 @@ mod tests {
         let (decoded, consumed) = Message::decode(&bytes).unwrap();
         assert_eq!(decoded, m);
         assert_eq!(consumed, bytes.len());
-        // Check tag-blob layout: number, string, number, binary.
+        // Check tag-blob layout: number, string, number, binary. The 12-byte
+        // blob lives at offset 20 (after the five header fields and the binary
+        // tag + 4-byte length prefix).
         assert_eq!(
-            &bytes[11..15],
+            &bytes[20..24],
             &[ARG_TAG_NUMBER, ARG_TAG_STRING, ARG_TAG_NUMBER, ARG_TAG_BINARY]
         );
     }

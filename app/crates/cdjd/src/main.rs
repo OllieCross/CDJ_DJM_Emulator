@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use cdj_core::feth::setup_plan;
+use cdj_core::library::Library;
 use cdj_core::net::Interface;
 use cdj_core::orchestrator::{Fleet, FleetConfig};
 use clap::{Parser, Subcommand};
@@ -64,6 +65,11 @@ enum Cmd {
         /// Applies to every loaded track. Per-track beat grids arrive with M3.
         #[arg(long, default_value_t = 0)]
         beat_offset_ms: u32,
+        /// Path to a Rekordbox USB export root (e.g. /Volumes/MY_USB or a
+        /// folder you exported into). Tracks are assigned in PDB order to
+        /// players 1..N and the dbserver serves real waveform/beat-grid data.
+        #[arg(long)]
+        library: Option<std::path::PathBuf>,
     },
 
     /// Run a single virtual CDJ (M0-style helper).
@@ -134,10 +140,20 @@ async fn main() -> Result<()> {
             autoplay,
             tracks,
             beat_offset_ms,
+            library,
         } => {
             let iface = Interface::by_name(&iface)
                 .with_context(|| format!("resolving interface {iface}"))?;
             let tracks = tracks.into_iter().map(Some).collect();
+            let library = if let Some(root) = library {
+                let lib = tokio::task::spawn_blocking(move || Library::open(&root))
+                    .await
+                    .context("library loader panicked")?
+                    .context("loading rekordbox library")?;
+                Some(lib)
+            } else {
+                None
+            };
             let cfg = FleetConfig {
                 iface,
                 num_players: players,
@@ -148,6 +164,7 @@ async fn main() -> Result<()> {
                 autoplay,
                 tracks,
                 beat_grid_offset_ms: beat_offset_ms,
+                library,
             };
             Fleet::new(cfg).run().await?;
         }
@@ -168,6 +185,7 @@ async fn main() -> Result<()> {
                 autoplay: false,
                 tracks: Vec::new(),
                 beat_grid_offset_ms: 0,
+                library: None,
             };
             Fleet::new(cfg).run().await?;
         }

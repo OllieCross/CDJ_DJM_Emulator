@@ -49,6 +49,12 @@ pub struct CdjStatus {
     pub packet_counter: u32,
     /// Position in the 4-beat bar (1..=4), used by sync-aware clients.
     pub beat_within_bar: u8,
+    /// Rekordbox track ID currently loaded (0 = nothing loaded).
+    /// Beat-link reads this from offset 0x2C and uses it to query the dbserver.
+    pub track_id: u32,
+    /// Absolute beat number since start of track (1-based). Beat-link reads this
+    /// at offset 0x48 to drive the Time/Remain display. 0 = no position known.
+    pub beat_number: u32,
 }
 
 impl CdjStatus {
@@ -62,6 +68,8 @@ impl CdjStatus {
             on_air: false,
             packet_counter: 0,
             beat_within_bar: 1,
+            track_id: 0,
+            beat_number: 0,
         }
     }
 
@@ -87,16 +95,19 @@ impl CdjStatus {
 
         // Offsets verified against beat-link CdjStatus.java (CDJ-3000, 212-byte packet).
         buf[0x24] = self.device_number; // duplicate copy in payload, observed in real packets
-        buf[0x25] = if self.playing { 1 } else { 0 }; // activity: 1 = USB present
+        // activity: 4 = USB track loaded; 0 = no track. BLT skips position
+        // tracking (and dbserver queries) when this is 0.
+        buf[0x25] = if self.track_id != 0 { 4 } else { 0 };
 
-        // Track source: fake a USB rekordbox track so clients show LOADED not UNLOADED.
-        // USB_SLOT=3, REKORDBOX=1. Rekordbox ID uses device_number (unique per deck).
-        // 0x28 (track source player) tells clients which player's dbserver to query
-        // for metadata; without it ShowKontrol/BLT never opens a connection to :1051.
-        buf[0x28] = self.device_number; // 40: track source player
-        buf[0x29] = 3; // 41: source slot: USB_SLOT
-        buf[0x2A] = 1; // 42: track type: REKORDBOX
-        buf[0x2C..0x30].copy_from_slice(&(self.device_number as u32).to_be_bytes()); // 44-47
+        // Track source fields. 0x28 tells BLT which player's dbserver to query;
+        // 0x2C-0x2F is the rekordbox ID BLT passes in the metadata request.
+        // All three must be non-zero/correct for BLT to open a dbserver connection.
+        if self.track_id != 0 {
+            buf[0x28] = self.device_number; // track source player (our own dbserver)
+            buf[0x29] = 3; // source slot: USB_SLOT
+            buf[0x2A] = 1; // track type: REKORDBOX
+            buf[0x2C..0x30].copy_from_slice(&self.track_id.to_be_bytes()); // rekordbox ID
+        }
 
         // PlayState1 (0x7B = 123): PLAYING=3, PAUSED=5. Tells clients track is loaded.
         buf[0x7B] = if self.playing { 3 } else { 5 };
@@ -121,6 +132,12 @@ impl CdjStatus {
         // Beat within bar at 0xA6 (166).
         buf[0xA6] = self.beat_within_bar.clamp(1, 4);
 
+        // Absolute beat number since start of track at 0x48 (72), 4 bytes BE.
+        // Beat-link uses this for the Time/Remain display. 0 = position unknown.
+        if self.beat_number > 0 {
+            buf[0x48..0x4C].copy_from_slice(&self.beat_number.to_be_bytes());
+        }
+
         // Packet counter at 0xC8 (200), 4 bytes BE.
         buf[0xC8..0xCC].copy_from_slice(&self.packet_counter.to_be_bytes());
 
@@ -140,6 +157,8 @@ impl CdjStatus {
         let bpm_hundredths = u16::from_be_bytes([buf[0x92], buf[0x93]]); // 146-147
         let mut ctr = [0u8; 4];
         ctr.copy_from_slice(&buf[0xC8..0xCC]);
+        let track_id = u32::from_be_bytes([buf[0x2C], buf[0x2D], buf[0x2E], buf[0x2F]]);
+        let beat_number = u32::from_be_bytes([buf[0x48], buf[0x49], buf[0x4A], buf[0x4B]]);
         Ok(Self {
             device_name: header.device_name,
             device_number,
@@ -149,6 +168,8 @@ impl CdjStatus {
             master: flags & 0x20 != 0,  // bit5
             packet_counter: u32::from_be_bytes(ctr),
             beat_within_bar: buf[0xA6].max(1).min(4), // 166
+            track_id,
+            beat_number,
         })
     }
 }
@@ -232,6 +253,8 @@ mod tests {
             on_air: true,
             packet_counter: 0xdead_beef,
             beat_within_bar: 3,
+            track_id: 42,
+            beat_number: 256,
         };
         let bytes = s.encode();
         assert_eq!(bytes.len(), CDJ_STATUS_LEN);

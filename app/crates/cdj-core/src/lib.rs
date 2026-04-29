@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod beat_clock;
 pub mod dbserver;
+pub mod library;
 pub mod feth;
 pub mod net;
 pub mod orchestrator;

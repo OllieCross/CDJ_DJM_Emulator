@@ -95,14 +95,22 @@ impl VirtualCdj {
         let audio_guard = if let Some(path) = self.cfg.track.clone() {
             let state = self.state.clone();
             let num = self.cfg.device_number;
-            let handle = tokio::task::spawn_blocking(move || {
-                AudioHandle::spawn(path, state)
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("audio task join: {e}"))??;
-            self.state.set_playing(true);
-            info!(num, "audio engine started");
-            Some(handle)
+            let path_display = path.display().to_string();
+            match tokio::task::spawn_blocking(move || AudioHandle::spawn(path, state)).await {
+                Ok(Ok(handle)) => {
+                    self.state.set_playing(true);
+                    info!(num, path = %path_display, "audio engine started");
+                    Some(handle)
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(num, path = %path_display, "audio engine failed to start: {e}");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(num, "audio spawn_blocking panicked: {e}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -154,6 +162,8 @@ impl VirtualCdj {
                 loop {
                     tick.tick().await;
                     ctr = ctr.wrapping_add(1);
+                    let track_id = state.loaded_track().map(|(_, id)| id).unwrap_or(0);
+                    let beat_number = if track_id != 0 { state.beat_number() } else { 0 };
                     let status = CdjStatus {
                         device_name: name.clone(),
                         device_number: num,
@@ -163,6 +173,8 @@ impl VirtualCdj {
                         on_air: state.on_air(),
                         packet_counter: ctr,
                         beat_within_bar: state.beat_within_bar(),
+                        track_id,
+                        beat_number,
                     };
                     let bytes = status.encode();
                     if let Err(e) = sock.send_to(&bytes, bcast).await {

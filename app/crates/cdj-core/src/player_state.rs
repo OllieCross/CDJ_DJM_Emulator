@@ -1,31 +1,28 @@
 //! Shared mutable state for a single virtual CDJ.
 //!
 //! Read by the status emitter and beat clock, written by the audio engine
-//! (M2.2) and the UI / CLI control layer. All fields are atomic so any task
-//! can observe or update them without locking.
+//! and the UI / CLI control layer. Atomic fields for lock-free hot paths;
+//! `loaded_track` uses an RwLock because it holds an Arc and is only written
+//! when the user explicitly loads or unloads a track.
 
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, RwLock};
+
+use crate::library::Library;
 
 pub struct PlayerState {
-    bpm_hundredths: AtomicU16,
+    pub bpm_hundredths: AtomicU16,
     playing: AtomicBool,
     master: AtomicBool,
     on_air: AtomicBool,
     beat_within_bar: AtomicU8,
-    /// Ordinal of the next beat to fire; used by the beat clock to keep the
-    /// bar counter and (eventually) audio playhead in sync.
     next_beat_ordinal: AtomicU32,
-    /// Frames of audio output so far (monotonic, device output domain).
-    /// Updated by the audio engine from its CPAL output callback.
     playhead_frames: AtomicU64,
-    /// Device output sample rate in Hz (matches `playhead_frames`' domain).
-    /// Zero when no track is loaded; the beat clock uses that as "no
-    /// playhead - fall back to wall-clock mode".
     sample_rate: AtomicU32,
-    /// Musical offset of beat 1 of bar 1 from the start of playback, in
-    /// milliseconds. Typically comes from a rekordbox beat-grid; user-
-    /// supplied via `--beat-offset-ms` for M2.3.
     beat_grid_offset_ms: AtomicU32,
+    /// Currently loaded track (library + track ID). Written on load/unload,
+    /// read by the dbserver on every metadata/waveform request.
+    loaded_track: RwLock<Option<(Arc<Library>, u32)>>,
 }
 
 impl PlayerState {
@@ -40,6 +37,7 @@ impl PlayerState {
             playhead_frames: AtomicU64::new(0),
             sample_rate: AtomicU32::new(0),
             beat_grid_offset_ms: AtomicU32::new(0),
+            loaded_track: RwLock::new(None),
         }
     }
 
@@ -75,7 +73,6 @@ impl PlayerState {
         self.beat_within_bar.load(Ordering::Relaxed).max(1).min(4)
     }
 
-    /// Advance the bar position. Returns the new value (1..=4).
     pub fn advance_beat(&self) -> u8 {
         let n = self.beat_within_bar.load(Ordering::Relaxed);
         let next = if n >= 4 { 1 } else { n + 1 };
@@ -89,12 +86,16 @@ impl PlayerState {
         self.next_beat_ordinal.store(0, Ordering::Relaxed);
     }
 
+    /// Absolute beat number since the player started (1-based).
+    /// Used by the CDJ status packet so BLT can show Time/Remain.
+    pub fn beat_number(&self) -> u32 {
+        self.next_beat_ordinal.load(Ordering::Relaxed) + 1
+    }
+
     pub fn playhead_frames(&self) -> u64 {
         self.playhead_frames.load(Ordering::Relaxed)
     }
 
-    /// Called by the audio engine to advance the playhead after each output
-    /// buffer.
     pub fn advance_playhead(&self, frames: u64) {
         self.playhead_frames.fetch_add(frames, Ordering::Relaxed);
     }
@@ -119,10 +120,28 @@ impl PlayerState {
         self.beat_grid_offset_ms.store(ms, Ordering::Relaxed);
     }
 
-    /// Set the bar-position directly (used by the beat clock in phase-locked
-    /// mode, where position is derived from the audio playhead rather than a
-    /// local counter).
     pub fn set_beat_within_bar(&self, b: u8) {
         self.beat_within_bar.store(b.max(1).min(4), Ordering::Relaxed);
+    }
+
+    // --- Track loading ---
+
+    /// Load a track from `library` onto this player. Updates BPM from the
+    /// track's stored tempo.
+    pub fn load_track(&self, library: Arc<Library>, track_id: u32) {
+        if let Some(track) = library.track_by_id(track_id) {
+            self.bpm_hundredths.store(track.bpm_hundredths, Ordering::Relaxed);
+        }
+        *self.loaded_track.write().unwrap() = Some((library, track_id));
+    }
+
+    pub fn unload_track(&self) {
+        *self.loaded_track.write().unwrap() = None;
+    }
+
+    /// Clone the currently loaded (library, track_id) pair. Cheap -- only
+    /// clones the Arc, not the library data.
+    pub fn loaded_track(&self) -> Option<(Arc<Library>, u32)> {
+        self.loaded_track.read().unwrap().clone()
     }
 }

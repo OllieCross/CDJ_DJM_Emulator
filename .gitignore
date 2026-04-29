@@ -1,10 +1,27 @@
-# build
+# Rust build artifacts
 app/target/
 **/target/
+
+# Vendored crates (patched locally, rebuilt from source)
+app/vendor/
+
+# Tauri generated files and build output
+ui/src-tauri/gen/
+ui/src-tauri/target/
+
+# Frontend build output and dependencies
+ui/dist/
+ui/node_modules/
+ui/package-lock.json
+
 # macOS
 .DS_Store
-# editor
+**/.DS_Store
+
+# Editors
 .vscode/
 .idea/
+
+# Claude Code
 .claude/
 prompt.md
