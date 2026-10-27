@@ -1,11 +1,12 @@
 //! `cdjd` - development CLI for the CDJ emulator.
 
 use anyhow::{Context, Result};
-use cdj_core::feth::setup_plan;
-use cdj_core::library::Library;
+use cdj_core::feth::{setup_plan, FethPlan, Layout};
+use cdj_core::media::{Medium, Slot};
 use cdj_core::net::Interface;
-use cdj_core::orchestrator::{Fleet, FleetConfig};
-use clap::{Parser, Subcommand};
+use cdj_core::rig::{Rig, RigConfig};
+use cdj_proto::announce::MIXER_NUM;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "cdjd", about = "CDJ emulator daemon (dev CLI)", version)]
@@ -14,35 +15,77 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LayoutArg {
+    /// Device addresses on feth0, same /24 as feth1 (known to work).
+    Shared,
+    /// Device addresses as /32 aliases on lo0; feth0 has no IPv4 (experimental).
+    Loopback,
+}
+
+/// The feth pair the emulator runs on.
+#[derive(Args, Debug)]
+struct NetArgs {
+    /// Emulator-side interface.
+    #[arg(long = "iface", default_value = "feth0")]
+    a: String,
+    /// Client-side interface (ShowKontrol / Beat Link Trigger use it).
+    #[arg(long = "client-iface", default_value = "feth1")]
+    b: String,
+    /// Address of player 1; the other devices use the same /24.
+    #[arg(long, default_value = "10.77.77.1")]
+    a_ip: String,
+    /// Client-side address; status and position packets are sent here too.
+    #[arg(long = "client-ip", default_value = "10.77.77.200")]
+    b_ip: String,
+    #[arg(long, default_value_t = 24)]
+    prefix: u8,
+    #[arg(long, value_enum, default_value_t = LayoutArg::Shared)]
+    layout: LayoutArg,
+}
+
+impl NetArgs {
+    fn plan(&self) -> FethPlan {
+        let layout = match self.layout {
+            LayoutArg::Shared => Layout::SharedSubnet,
+            LayoutArg::Loopback => Layout::LoopbackAliases,
+        };
+        setup_plan(&self.a, &self.b, &self.a_ip, &self.b_ip, self.prefix).with_layout(layout)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// List IPv4 network interfaces.
     Ifaces,
 
-    /// Print the shell commands needed to create a macOS `feth` virtual
-    /// ethernet pair for isolating the emulator's broadcasts.
+    /// Print the shell commands that create the feth pair.
     FethPlan {
-        #[arg(long, default_value = "feth0")]
-        a: String,
-        #[arg(long, default_value = "feth1")]
-        b: String,
-        #[arg(long, default_value = "10.77.77.1")]
-        a_ip: String,
-        #[arg(long, default_value = "10.77.77.200")]
-        b_ip: String,
-        #[arg(long, default_value_t = 24)]
-        prefix: u8,
+        #[command(flatten)]
+        net: NetArgs,
         #[arg(long)]
         teardown: bool,
     },
 
-    /// Run a full fleet: N virtual CDJs + (optionally) a virtual DJM.
+    /// Create the feth pair (asks for an administrator password).
+    NetUp {
+        #[command(flatten)]
+        net: NetArgs,
+    },
+
+    /// Remove the feth pair (asks for an administrator password).
+    NetDown {
+        #[command(flatten)]
+        net: NetArgs,
+    },
+
+    /// Run a full rig: N virtual CDJs + (optionally) a virtual DJM.
     RunFleet {
-        #[arg(short, long)]
-        iface: String,
+        #[command(flatten)]
+        net: NetArgs,
         #[arg(long, default_value_t = 4)]
         players: u8,
-        /// Omit the virtual DJM from the fleet.
+        /// Omit the virtual DJM.
         #[arg(long)]
         no_mixer: bool,
         #[arg(long, default_value = "CDJ-3000")]
@@ -52,30 +95,37 @@ enum Cmd {
         /// Initial tempo in BPM (e.g. 128.0).
         #[arg(long, default_value_t = 120.0)]
         bpm: f32,
-        /// Start every player in the "playing" state so they emit beat
-        /// packets immediately. Useful for timecode / ShowKontrol dev.
+        /// Start every player playing so they emit beats immediately
+        /// (timecode-only mode).
         #[arg(long)]
         autoplay: bool,
-        /// Track files to load, one per player (up to 4). Pass the flag
-        /// multiple times: --track a.flac --track b.mp3. Players without a
-        /// track stay idle.
+        /// Audio files, one per player (up to 4): --track a.flac --track b.mp3.
         #[arg(long = "track")]
         tracks: Vec<std::path::PathBuf>,
         /// Offset from playback start to the first beat of bar 1, in ms.
-        /// Applies to every loaded track. Per-track beat grids arrive with M3.
         #[arg(long, default_value_t = 0)]
         beat_offset_ms: u32,
-        /// Path to a Rekordbox USB export root (e.g. /Volumes/MY_USB or a
-        /// folder you exported into). Tracks are assigned in PDB order to
-        /// players 1..N and the dbserver serves real waveform/beat-grid data.
+        /// Audio output device (see `cdjd audio-devices`); default: the
+        /// system output.
+        #[arg(long)]
+        audio_device: Option<String>,
+        /// Don't play audio (beats and positions still run).
+        #[arg(long)]
+        silent: bool,
+        /// Rekordbox export root (e.g. /Volumes/MY_USB). It goes into player
+        /// 1's USB slot; players 1..N load its first N tracks (2..N over the
+        /// link).
         #[arg(long)]
         library: Option<std::path::PathBuf>,
     },
 
-    /// Run a single virtual CDJ (M0-style helper).
+    /// List audio output devices.
+    AudioDevices,
+
+    /// Run a single virtual CDJ.
     Run {
-        #[arg(short, long)]
-        iface: String,
+        #[command(flatten)]
+        net: NetArgs,
         #[arg(short = 'n', long, default_value_t = 1)]
         device_number: u8,
         #[arg(short, long, default_value = "CDJ-3000")]
@@ -85,6 +135,27 @@ enum Cmd {
 
 fn bpm_to_hundredths(bpm: f32) -> u16 {
     (bpm * 100.0).round().clamp(0.0, u16::MAX as f32) as u16
+}
+
+fn rig_config(net: &NetArgs, player_model: String, mixer_model: String) -> Result<RigConfig> {
+    let plan = net.plan();
+    let status = plan.status();
+    if !status.ready() {
+        anyhow::bail!(
+            "network not ready ({status:?}); run `cdjd net-up` first, or `cdjd feth-plan` to see the commands"
+        );
+    }
+    let (topology, addressing) = plan.rig_network()?;
+    let mixer_channels = if mixer_model == "DJM-V10" { 6 } else { 4 };
+    Ok(RigConfig {
+        topology,
+        addressing,
+        player_model,
+        mixer_model,
+        mixer_channels,
+        initial_bpm_hundredths: 12000,
+        beat_grid_offset_ms: 0,
+    })
 }
 
 #[tokio::main]
@@ -110,28 +181,30 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::FethPlan {
-            a,
-            b,
-            a_ip,
-            b_ip,
-            prefix,
-            teardown,
-        } => {
-            let plan = setup_plan(a, b, a_ip, b_ip, prefix);
+        Cmd::FethPlan { net, teardown } => {
+            let plan = net.plan();
             println!("# Bring up a feth pair for the emulator. Requires sudo.");
             for c in plan.commands() {
-                println!("{c}");
+                println!("sudo sh -c '{c}'");
             }
             if teardown {
                 println!("\n# Teardown:");
                 for c in plan.teardown_commands() {
-                    println!("{c}");
+                    println!("sudo sh -c '{c}'");
                 }
             }
         }
+        Cmd::NetUp { net } => {
+            let plan = net.plan();
+            plan.apply()?;
+            println!("network up: {:?}", plan.status());
+        }
+        Cmd::NetDown { net } => {
+            net.plan().teardown()?;
+            println!("network removed");
+        }
         Cmd::RunFleet {
-            iface,
+            net,
             players,
             no_mixer,
             player_model,
@@ -140,54 +213,64 @@ async fn main() -> Result<()> {
             autoplay,
             tracks,
             beat_offset_ms,
+            audio_device,
+            silent,
             library,
         } => {
-            let iface = Interface::by_name(&iface)
-                .with_context(|| format!("resolving interface {iface}"))?;
-            let tracks = tracks.into_iter().map(Some).collect();
-            let library = if let Some(root) = library {
-                let lib = tokio::task::spawn_blocking(move || Library::open(&root))
+            let mut cfg = rig_config(&net, player_model, mixer_model)?;
+            cfg.initial_bpm_hundredths = bpm_to_hundredths(bpm);
+            cfg.beat_grid_offset_ms = beat_offset_ms;
+
+            let rig = Rig::new(cfg);
+            if !silent {
+                match rig.set_output_device(audio_device.as_deref()) {
+                    Ok(name) => println!("audio out: {name}"),
+                    Err(e) => eprintln!("no audio output ({e:#}); running silently"),
+                }
+            }
+            for n in 1..=players.min(4) {
+                rig.spawn_player(n).await?;
+            }
+            if !no_mixer {
+                rig.spawn_mixer().await?;
+            }
+            if let Some(root) = library {
+                let medium = tokio::task::spawn_blocking(move || Medium::open(&root))
                     .await
                     .context("library loader panicked")?
-                    .context("loading rekordbox library")?;
-                Some(lib)
-            } else {
-                None
-            };
-            let cfg = FleetConfig {
-                iface,
-                num_players: players,
-                include_mixer: !no_mixer,
-                player_model,
-                mixer_model,
-                initial_bpm_hundredths: bpm_to_hundredths(bpm),
-                autoplay,
-                tracks,
-                beat_grid_offset_ms: beat_offset_ms,
-                library,
-            };
-            Fleet::new(cfg).run().await?;
+                    .context("loading rekordbox export")?;
+                rig.insert_media(1, Slot::Usb, medium.clone())?;
+                for (n, track) in (1..=players.min(4)).zip(&medium.library.tracks) {
+                    rig.load_track(n, 1, Slot::Usb, track.id).await?;
+                }
+            }
+            for (n, path) in (1..=players.min(4)).zip(tracks) {
+                rig.load_file(n, path).await?;
+            }
+            if autoplay {
+                for n in 1..=players.min(4) {
+                    rig.play(n)?;
+                }
+            }
+            println!("rig running on {} (device {}..{}, mixer {MIXER_NUM}); Ctrl-C to stop", net.a, 1, players.min(4));
+            tokio::signal::ctrl_c().await?;
+            rig.shutdown();
+        }
+        Cmd::AudioDevices => {
+            for name in cdj_core::engine::AudioEngine::output_devices() {
+                println!("{name}");
+            }
         }
         Cmd::Run {
-            iface,
+            net,
             device_number,
             model,
         } => {
-            let iface = Interface::by_name(&iface)
-                .with_context(|| format!("resolving interface {iface}"))?;
-            let cfg = FleetConfig {
-                iface,
-                num_players: device_number.clamp(1, 4),
-                include_mixer: false,
-                player_model: model,
-                mixer_model: "DJM-V10".to_string(),
-                initial_bpm_hundredths: 12000,
-                autoplay: false,
-                tracks: Vec::new(),
-                beat_grid_offset_ms: 0,
-                library: None,
-            };
-            Fleet::new(cfg).run().await?;
+            let rig = Rig::new(rig_config(&net, model, "DJM-V10".into())?);
+            rig.spawn_player(device_number).await?;
+            println!("player {device_number} running; Ctrl-C to stop");
+            tokio::signal::ctrl_c().await?;
+            rig.shutdown();
         }
     }
     Ok(())

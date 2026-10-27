@@ -38,6 +38,10 @@ pub const CLAIM_PACKET_SPACING_MS: u64 = 300;
 /// Number of times each stage is repeated.
 pub const CLAIM_REPEATS: u8 = 3;
 
+/// Byte 0x21 of all three claim stages; 0x03 in beat-link's claim templates
+/// (keep-alives use 0x02).
+pub const CLAIM_SUBTYPE: u8 = 0x03;
+
 pub const STAGE1_LEN: usize = 44;
 pub const STAGE2_LEN: usize = 50;
 pub const STAGE3_LEN: usize = 38;
@@ -65,7 +69,7 @@ impl ClaimStage1 {
         let mut i = Header::ENCODED_LEN;
         buf[i] = 0x01; // sub-type marker
         i += 1;
-        buf[i] = 0x02; // sub-type byte (claim / device announce family)
+        buf[i] = CLAIM_SUBTYPE;
         i += 1;
         buf[i..i + 2].copy_from_slice(&(STAGE1_LEN as u16).to_be_bytes());
         i += 2;
@@ -127,7 +131,7 @@ impl ClaimStage2 {
         let mut i = Header::ENCODED_LEN;
         buf[i] = 0x01;
         i += 1;
-        buf[i] = 0x02;
+        buf[i] = CLAIM_SUBTYPE;
         i += 1;
         buf[i..i + 2].copy_from_slice(&(STAGE2_LEN as u16).to_be_bytes());
         i += 2;
@@ -201,7 +205,7 @@ impl ClaimStage3 {
         let mut i = Header::ENCODED_LEN;
         buf[i] = 0x01;
         i += 1;
-        buf[i] = 0x02;
+        buf[i] = CLAIM_SUBTYPE;
         i += 1;
         buf[i..i + 2].copy_from_slice(&(STAGE3_LEN as u16).to_be_bytes());
         i += 2;

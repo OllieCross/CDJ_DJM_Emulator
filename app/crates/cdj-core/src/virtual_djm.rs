@@ -1,133 +1,102 @@
 //! A single virtual DJM mixer (device number 33).
 //!
-//! Mirrors [`crate::virtual_cdj::VirtualCdj`] but emits DJM status packets on
-//! :50002 rather than CDJ status.
+//! Every 200 ms it sends mixer status on :50002 (passing along the tempo
+//! master's BPM and beat, as real mixers do) and a channels-on-air packet on
+//! :50001 so players and clients see which decks are audible.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use cdj_proto::{
-    announce::MIXER_NUM,
-    claim::{ClaimStage1, ClaimStage2, ClaimStage3, CLAIM_PACKET_SPACING_MS, CLAIM_REPEATS},
-    DeviceName, DjmStatus, KeepAlive,
-};
-use tokio::net::UdpSocket;
+use cdj_proto::{announce::MIXER_NUM, ChannelsOnAir, DeviceName, DjmStatus};
+use tokio::task::JoinSet;
 use tokio::time;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::net::{broadcast_addr, Interface, PORT_ANNOUNCE, PORT_STATUS};
-
-pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(1500);
-pub const STATUS_INTERVAL: Duration = Duration::from_millis(200);
+use crate::link::{DeviceLink, Port};
+use crate::rig::RigShared;
+use crate::virtual_cdj::{claim, keep_alive_loop, STATUS_INTERVAL};
 
 #[derive(Debug, Clone)]
 pub struct VirtualDjmConfig {
     pub model_name: String,
-    pub iface: Interface,
     pub mac: [u8; 6],
-    pub ip: [u8; 4],
+    /// Mixer channels: 4, or 6 for the DJM-V10.
+    pub channels: u8,
 }
 
 pub struct VirtualDjm {
     cfg: VirtualDjmConfig,
-    announce_sock: Arc<UdpSocket>,
-    status_sock: Arc<UdpSocket>,
+    link: Arc<DeviceLink>,
+    rig: Arc<RigShared>,
 }
 
 impl VirtualDjm {
-    pub fn new(
+    pub(crate) fn new(
         cfg: VirtualDjmConfig,
-        announce_sock: Arc<UdpSocket>,
-        status_sock: Arc<UdpSocket>,
+        link: Arc<DeviceLink>,
+        rig: Arc<RigShared>,
     ) -> Self {
-        Self {
-            cfg,
-            announce_sock,
-            status_sock,
-        }
+        Self { cfg, link, rig }
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
         let device_name = DeviceName::new(&self.cfg.model_name)
             .map_err(|e| anyhow::anyhow!("device name invalid: {e}"))?;
 
-        info!(device = %self.cfg.model_name, num = MIXER_NUM, "virtual DJM starting claim sequence");
-
-        self.run_claim(&device_name).await?;
-
-        let announce_dest = broadcast_addr(&self.cfg.iface, PORT_ANNOUNCE);
-        let status_dest = broadcast_addr(&self.cfg.iface, PORT_STATUS);
-        let keepalive = KeepAlive {
-            device_name: device_name.clone(),
-            device_number: MIXER_NUM,
-            mac: self.cfg.mac,
-            ip: self.cfg.ip,
-        }
-        .encode();
-
-        let status = DjmStatus::idle(device_name);
-
-        let mut keepalive_tick = time::interval(KEEPALIVE_INTERVAL);
-        keepalive_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-        let mut status_tick = time::interval(STATUS_INTERVAL);
-        status_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
+        info!(device = %self.cfg.model_name, num = MIXER_NUM, ip = %self.link.ip, "virtual DJM starting claim sequence");
+        claim(&self.link, &device_name, self.cfg.mac, MIXER_NUM).await?;
         info!(num = MIXER_NUM, "virtual DJM online");
 
-        loop {
-            tokio::select! {
-                _ = keepalive_tick.tick() => {
-                    if let Err(e) = self.announce_sock.send_to(&keepalive, announce_dest).await {
-                        tracing::warn!("DJM keep-alive send failed: {e}");
-                    }
-                }
-                _ = status_tick.tick() => {
-                    let bytes = status.encode();
-                    if let Err(e) = self.status_sock.send_to(&bytes, status_dest).await {
-                        tracing::warn!("DJM status send failed: {e}");
-                    }
-                    debug!("DJM status sent");
-                }
-            }
-        }
-    }
+        let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+        tasks.spawn(keep_alive_loop(
+            self.link.clone(),
+            device_name.clone(),
+            MIXER_NUM,
+            self.cfg.mac,
+            self.rig.peers_seen.clone(),
+        ));
 
-    async fn run_claim(&self, name: &DeviceName) -> anyhow::Result<()> {
-        let dest = broadcast_addr(&self.cfg.iface, PORT_ANNOUNCE);
-        let spacing = Duration::from_millis(CLAIM_PACKET_SPACING_MS);
-        for step in 1..=CLAIM_REPEATS {
-            let pkt = ClaimStage1 {
-                device_name: name.clone(),
-                step,
-                mac: self.cfg.mac,
+        let link = self.link.clone();
+        let rig = self.rig.clone();
+        let channels = self.cfg.channels;
+        tasks.spawn(async move {
+            let mut tick = time::interval(STATUS_INTERVAL);
+            tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                rig.refresh_mixer();
+
+                // Mixers pass along the tempo master's on-screen BPM and beat.
+                let master = rig.tempo_master().map(|d| d.view());
+                let status = DjmStatus {
+                    bpm_hundredths: master
+                        .as_ref()
+                        .map_or(12000, |v| (v.effective_bpm() * 100.0).round() as u16),
+                    beat_within_bar: master.as_ref().map_or(1, |v| v.bar_beat.max(1)),
+                    ..DjmStatus::idle(device_name.clone())
+                };
+                if let Err(e) = link.send_update(Port::Status, &status.encode()).await {
+                    warn!("DJM status send failed: {e}");
+                }
+
+                let on_air = ChannelsOnAir {
+                    device_name: device_name.clone(),
+                    device_number: MIXER_NUM,
+                    channels: rig.channels_on_air(channels),
+                };
+                if let Err(e) = link.send_update(Port::Beat, &on_air.encode()).await {
+                    warn!("DJM on-air send failed: {e}");
+                }
+                debug!("DJM status sent");
             }
-            .encode();
-            self.announce_sock.send_to(&pkt, dest).await?;
-            time::sleep(spacing).await;
-        }
-        for step in 1..=CLAIM_REPEATS {
-            let pkt = ClaimStage2 {
-                device_name: name.clone(),
-                step,
-                mac: self.cfg.mac,
-                ip: self.cfg.ip,
-                device_number: MIXER_NUM,
-                user_assigned: true,
+        });
+
+        loop {
+            match tasks.join_next().await {
+                Some(Ok(Ok(()))) => {}
+                Some(Ok(Err(e))) => return Err(e),
+                Some(Err(e)) => return Err(anyhow::anyhow!("task panicked: {e}")),
+                None => return Ok(()),
             }
-            .encode();
-            self.announce_sock.send_to(&pkt, dest).await?;
-            time::sleep(spacing).await;
         }
-        for step in 1..=CLAIM_REPEATS {
-            let pkt = ClaimStage3 {
-                device_name: name.clone(),
-                step,
-                device_number: MIXER_NUM,
-            }
-            .encode();
-            self.announce_sock.send_to(&pkt, dest).await?;
-            time::sleep(spacing).await;
-        }
-        Ok(())
     }
 }

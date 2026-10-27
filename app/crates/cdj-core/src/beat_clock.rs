@@ -21,24 +21,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cdj_proto::{Beat, DeviceName};
-use tokio::net::UdpSocket;
 use tokio::time;
 use tracing::{debug, trace};
 
-use crate::net::{broadcast_addr, Interface, PORT_BEAT};
+use crate::link::{DeviceLink, Port};
 use crate::player_state::PlayerState;
 
 pub struct BeatClock {
     pub device_name: DeviceName,
     pub device_number: u8,
     pub state: Arc<PlayerState>,
-    pub iface: Interface,
-    pub socket: Arc<UdpSocket>,
+    pub link: Arc<DeviceLink>,
 }
 
 impl BeatClock {
     pub async fn run(self) -> anyhow::Result<()> {
-        let dest = broadcast_addr(&self.iface, PORT_BEAT);
         let mut wallclock_next = Instant::now();
         // In phase-locked mode, track the last ordinal we fired. The playhead
         // is updated by the CPAL callback at buffer granularity (~10 ms on
@@ -79,7 +76,7 @@ impl BeatClock {
                     beat_within_bar: next.beat_within_bar,
                 }
                 .encode();
-                if let Err(e) = self.socket.send_to(&pkt, dest).await {
+                if let Err(e) = self.link.broadcast(Port::Beat, &pkt).await {
                     tracing::warn!("beat send failed: {e}");
                 } else {
                     trace!(
@@ -91,6 +88,10 @@ impl BeatClock {
                     );
                 }
                 last_fired_ord = Some(next.ordinal);
+                // Keep PlayerState in sync so CDJ status broadcasts the
+                // correct beat number. beat_number() returns ord+1 (BLT-style
+                // 1-based "next beat" counter).
+                self.state.set_beat_ordinal(next.ordinal as u32);
                 if next.beat_within_bar == 1 {
                     debug!(num = self.device_number, "bar rollover");
                 }
@@ -109,7 +110,7 @@ impl BeatClock {
                     beat_within_bar,
                 }
                 .encode();
-                if let Err(e) = self.socket.send_to(&pkt, dest).await {
+                if let Err(e) = self.link.broadcast(Port::Beat, &pkt).await {
                     tracing::warn!("beat send failed: {e}");
                 } else {
                     trace!(

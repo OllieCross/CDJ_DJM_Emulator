@@ -17,6 +17,12 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 
 [patch.crates-io]
 rekordcrate = { path = "../../app/vendor/rekordcrate" }
+
+# The time-stretcher (C++) is too slow unoptimised for real-time audio,
+# even in debug builds.
+[profile.dev.package.signalsmith-stretch]
+opt-level = 3

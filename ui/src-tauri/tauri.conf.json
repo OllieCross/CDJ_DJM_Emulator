@@ -12,10 +12,12 @@
     "windows": [
       {
         "title": "CDJ Emulator",
-        "width": 1200,
-        "height": 780,
+        "width": 1600,
+        "height": 1000,
         "resizable": true,
-        "decorations": true
+        "decorations": true,
+        "minWidth": 1280,
+        "minHeight": 800
       }
     ],
     "security": {
@@ -25,6 +27,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ]
   }
 }

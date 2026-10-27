@@ -25,3 +25,6 @@ ui/package-lock.json
 # Claude Code
 .claude/
 prompt.md
+
+# Real-gear packet captures (contain MAC addresses of your devices)
+captures/

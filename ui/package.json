@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.8.3",
     "esbuild": "^0.28.0"
   }
 }

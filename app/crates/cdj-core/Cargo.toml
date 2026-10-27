@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 cdj-proto = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 mac_address = { workspace = true }
@@ -21,3 +22,4 @@ socket2 = { workspace = true }
 libc = { workspace = true }
 rekordcrate = { version = "0.3.0", default-features = false }
 binrw = { workspace = true }
+signalsmith-stretch = { workspace = true }

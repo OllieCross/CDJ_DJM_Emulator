@@ -314,6 +314,17 @@ where
         config,
         move |out: &mut [T], _info: &cpal::OutputCallbackInfo| {
             let frames = out.len() / channels_out;
+            let playing = state_cb.playing();
+
+            if !playing {
+                // Paused/stopped: emit silence, freeze cursor + playhead.
+                let zero = T::from_f32(0.0);
+                for s in out.iter_mut() {
+                    *s = zero;
+                }
+                return;
+            }
+
             for frame_idx in 0..frames {
                 let src_pos = cursor_f64;
                 let i0 = src_pos.floor() as usize;

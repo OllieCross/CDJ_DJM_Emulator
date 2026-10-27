@@ -29,7 +29,8 @@
 //! 37      1    0x01     constant (believed: "device number assigned")
 //! 38      6    mac_address
 //! 44      4    ip_address (v4)
-//! 48      6    trailer  0x02 0x00 0x00 0x00 0x01 0x00
+//! 48      1    peer_count  devices this one has seen on the network
+//! 49      5    trailer  0x00 0x00 0x00 0x01 0x64 (beat-link's template)
 //! ```
 
 use crate::error::DecodeError;
@@ -39,7 +40,7 @@ pub const KEEPALIVE_LEN: usize = 54;
 pub const KEEPALIVE_SUBTYPE_MARKER: u8 = 0x01;
 pub const KEEPALIVE_SUBTYPE: u8 = 0x02;
 pub const KEEPALIVE_CONSTANT_37: u8 = 0x01;
-pub const KEEPALIVE_TRAILER: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x01, 0x00];
+pub const KEEPALIVE_TRAILER: [u8; 5] = [0x00, 0x00, 0x00, 0x01, 0x64];
 
 /// Device-number ranges from the Pro DJ Link analysis.
 pub const PLAYER_NUM_MIN: u8 = 1;
@@ -52,6 +53,9 @@ pub struct KeepAlive {
     pub device_number: u8,
     pub mac: [u8; 6],
     pub ip: [u8; 4],
+    /// Number of devices this one has seen on the network (beat-link's
+    /// `DeviceAnnouncement.getPeerCount`).
+    pub peer_count: u8,
 }
 
 impl KeepAlive {
@@ -80,7 +84,9 @@ impl KeepAlive {
         i += 6;
         buf[i..i + 4].copy_from_slice(&self.ip);
         i += 4;
-        buf[i..i + 6].copy_from_slice(&KEEPALIVE_TRAILER);
+        buf[i] = self.peer_count;
+        i += 1;
+        buf[i..i + 5].copy_from_slice(&KEEPALIVE_TRAILER);
 
         buf
     }
@@ -118,12 +124,14 @@ impl KeepAlive {
         i += 6;
         let mut ip = [0u8; 4];
         ip.copy_from_slice(&buf[i..i + 4]);
+        i += 4;
 
         Ok(Self {
             device_name: header.device_name,
             device_number,
             mac,
             ip,
+            peer_count: buf[i],
         })
     }
 }
@@ -148,6 +156,7 @@ mod tests {
             device_number: 1,
             mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
             ip: [169, 254, 1, 10],
+            peer_count: 5,
         }
     }
 
@@ -177,7 +186,8 @@ mod tests {
     #[test]
     fn keepalive_trailer_matches_fixture() {
         let bytes = sample().encode();
-        assert_eq!(&bytes[48..54], &KEEPALIVE_TRAILER);
+        assert_eq!(bytes[48], 5, "DeviceAnnouncement.getPeerCount reads 0x30");
+        assert_eq!(&bytes[49..54], &KEEPALIVE_TRAILER);
     }
 
     #[test]

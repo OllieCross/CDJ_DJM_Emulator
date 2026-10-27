@@ -6,8 +6,8 @@
 //! to fetch the track title / artist / BPM of whatever is loaded on each deck.
 //!
 //! This module is the wire codec: [`Message`] framing and [`Field`] encoding.
-//! Server behaviour (accept, handshake, synthetic track data) lives in
-//! `cdj_core::dbserver`.
+//! Server behaviour (accept, handshake, track data from the loaded library)
+//! lives in `cdj_core::dbserver`.
 //!
 //! Wire format ([Deep-Symmetry beat-link reference][ref]):
 //!
@@ -37,40 +37,88 @@ pub const SETUP_TXID: u32 = 0xffff_fffe;
 /// TCP connection opens. It is a bare 4-byte NumberField (no message header).
 pub const GREETING: [u8; 5] = [0x11, 0x00, 0x00, 0x00, 0x01];
 
-// Message types (opcodes).
+// Message types, from beat-link's `Message.KnownType` (which also documents
+// each type's arguments). Requests carry an `r:m:s:t` number first:
+// requesting player, menu, slot, track type, one byte each.
 pub const MSG_SETUP_REQ: u16 = 0x0000;
 pub const MSG_TEARDOWN_REQ: u16 = 0x0100;
 pub const MSG_ROOT_MENU_REQ: u16 = 0x1000;
-pub const MSG_TRACKS_MENU_REQ: u16 = 0x1100;
+pub const MSG_GENRE_MENU_REQ: u16 = 0x1001;
+pub const MSG_ARTIST_MENU_REQ: u16 = 0x1002;
+pub const MSG_ALBUM_MENU_REQ: u16 = 0x1003;
+pub const MSG_TRACK_MENU_REQ: u16 = 0x1004;
+pub const MSG_ALBUM_MENU_FOR_ARTIST_REQ: u16 = 0x1102;
+pub const MSG_TRACK_MENU_FOR_ALBUM_REQ: u16 = 0x1103;
+/// `[r:m:s:t, sort, playlist/folder ID, 0 = playlist / 1 = folder]`
+pub const MSG_PLAYLIST_REQ: u16 = 0x1105;
+/// `[r:m:s:t, sort, artist ID, album ID or -1 for all]`
+pub const MSG_TRACK_MENU_FOR_ARTIST_AND_ALBUM_REQ: u16 = 0x1202;
+/// `[r:m:s:t, sort, string byte size, upper-case string, 0]`
+pub const MSG_SEARCH_MENU_REQ: u16 = 0x1300;
+/// `[r:m:s:t, rekordbox ID]`
 pub const MSG_REKORDBOX_METADATA_REQ: u16 = 0x2002;
+/// `[r:m:s:t, artwork ID]`
 pub const MSG_ARTWORK_REQ: u16 = 0x2003;
+/// `[r:m:s:t, 4, rekordbox ID, 0]`
 pub const MSG_WAVEFORM_PREVIEW_REQ: u16 = 0x2004;
+/// `[r:m:s:t, rekordbox ID]`
+pub const MSG_CUE_LIST_REQ: u16 = 0x2104;
+/// `[r:m:s:t, rekordbox ID]`
 pub const MSG_BEAT_GRID_REQ: u16 = 0x2204;
+/// `[r:m:s:t, rekordbox ID]`
 pub const MSG_WAVEFORM_DETAIL_REQ: u16 = 0x2904;
+/// `[r:m:s:t, rekordbox ID, 0]`
+pub const MSG_CUE_LIST_EXT_REQ: u16 = 0x2b04;
+/// `[r:m:s:t, rekordbox ID, tag fourcc, file extension]`; the fourcc and
+/// extension are ASCII read as little-endian numbers ("PWV4", "EXT").
+pub const MSG_ANLZ_TAG_REQ: u16 = 0x2c04;
+/// `[r:m:s:t, offset, limit, 0, limit, 0]`: send items of the last menu.
 pub const MSG_RENDER_MENU_REQ: u16 = 0x3000;
+/// `[request type, item count]`
 pub const MSG_MENU_AVAILABLE: u16 = 0x4000;
 pub const MSG_MENU_HEADER: u16 = 0x4001;
+/// `[request type, 0, length, JPEG]`
 pub const MSG_ARTWORK_RESP: u16 = 0x4002;
+/// `[request type]`: the requested data or media isn't there.
+pub const MSG_UNAVAILABLE: u16 = 0x4003;
 pub const MSG_MENU_ITEM: u16 = 0x4101;
 pub const MSG_MENU_FOOTER: u16 = 0x4201;
-/// Response type for waveform preview data (beat-link KnownType.WAVE_PREVIEW).
+/// `[request type, 0, length, data]`
 pub const MSG_WAVE_PREVIEW: u16 = 0x4402;
-/// Response type for beat grid data (beat-link KnownType.BEAT_GRID).
+/// `[request type, 0, length, data, 0]`
 pub const MSG_BEAT_GRID_RESP: u16 = 0x4602;
-/// Response type for full waveform detail data (beat-link KnownType.WAVE_DETAIL).
-pub const MSG_WAVE_DETAIL_RESP: u16 = 0x4A02;
+/// `[request type, 0, length, data]`
+pub const MSG_WAVE_DETAIL_RESP: u16 = 0x4a02;
+/// `[request type, 0, length, entries, entry count]`
+pub const MSG_CUE_LIST_EXT: u16 = 0x4e02;
+/// `[request type, 0, length, data, 1]`; data is 4 bytes then the raw tag.
+pub const MSG_ANLZ_TAG: u16 = 0x4f02;
 
-// Menu-item type bytes (argument 7 in a MENU_ITEM message).
-pub const ITEM_ALBUM: u8 = 0x02;
-pub const ITEM_TITLE: u8 = 0x04;
-pub const ITEM_GENRE: u8 = 0x06;
-pub const ITEM_ARTIST: u8 = 0x07;
-pub const ITEM_RATING: u8 = 0x0a;
-pub const ITEM_DURATION: u8 = 0x0b;
-pub const ITEM_TEMPO: u8 = 0x0d;
-pub const ITEM_KEY: u8 = 0x0f;
-pub const ITEM_COMMENT: u8 = 0x23;
-pub const ITEM_DATE_ADDED: u8 = 0x2e;
+// Menu item types (argument 6 of a MENU_ITEM), from beat-link's
+// `Message.MenuItemType`.
+pub const ITEM_FOLDER: u32 = 0x01;
+pub const ITEM_ALBUM: u32 = 0x02;
+pub const ITEM_TITLE: u32 = 0x04;
+pub const ITEM_GENRE: u32 = 0x06;
+pub const ITEM_ARTIST: u32 = 0x07;
+pub const ITEM_PLAYLIST: u32 = 0x08;
+pub const ITEM_RATING: u32 = 0x0a;
+pub const ITEM_DURATION: u32 = 0x0b;
+pub const ITEM_TEMPO: u32 = 0x0d;
+pub const ITEM_KEY: u32 = 0x0f;
+/// Colour items run from `ITEM_COLOR_NONE` (no colour) to 0x1b (purple),
+/// in rekordbox colour-label order.
+pub const ITEM_COLOR_NONE: u32 = 0x13;
+pub const ITEM_COMMENT: u32 = 0x23;
+pub const ITEM_DATE_ADDED: u32 = 0x2e;
+pub const ITEM_GENRE_MENU: u32 = 0x80;
+pub const ITEM_ARTIST_MENU: u32 = 0x81;
+pub const ITEM_ALBUM_MENU: u32 = 0x82;
+pub const ITEM_TRACK_MENU: u32 = 0x83;
+pub const ITEM_PLAYLIST_MENU: u32 = 0x84;
+pub const ITEM_SEARCH_MENU: u32 = 0x91;
+/// A track row showing its title and artist.
+pub const ITEM_TRACK_TITLE_AND_ARTIST: u32 = 0x0704;
 
 // Field type markers (first byte of each field payload).
 const TAG_NUM1: u8 = 0x0f;
@@ -247,6 +295,16 @@ impl Field {
     }
 }
 
+/// Whether `arg` is left off the wire: a binary argument whose preceding
+/// number (its length) is 0, as beat-link's `Message.read` expects.
+fn omitted_binary(prev: Option<&Field>, arg: &Field) -> bool {
+    let prev_is_zero = matches!(
+        prev,
+        Some(Field::Number1(0) | Field::Number2(0) | Field::Number4(0))
+    );
+    matches!(arg, Field::Binary(data) if data.is_empty()) && prev_is_zero
+}
+
 /// A full dbserver message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -261,6 +319,24 @@ impl Message {
             transaction_id,
             message_type,
             arguments,
+        }
+    }
+
+    /// Argument `i` as a number, whatever its width.
+    pub fn number(&self, i: usize) -> Option<u32> {
+        match self.arguments.get(i)? {
+            Field::Number1(v) => Some(u32::from(*v)),
+            Field::Number2(v) => Some(u32::from(*v)),
+            Field::Number4(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Argument `i` as a string.
+    pub fn string(&self, i: usize) -> Option<&str> {
+        match self.arguments.get(i)? {
+            Field::String(s) => Some(s),
+            _ => None,
         }
     }
 
@@ -292,9 +368,15 @@ impl Message {
         buf.push(TAG_BINARY);
         buf.extend_from_slice(&(TYPE_TAG_BLOB_LEN as u32).to_be_bytes());
         buf.extend_from_slice(&tags);
-        // Arguments (each carries its own inline tag via encode_into).
+        // Arguments (each carries its own inline tag via encode_into). A
+        // binary argument after a number holding 0 (its length) is left off
+        // the wire; the type-tag blob still lists it.
+        let mut prev: Option<&Field> = None;
         for arg in &self.arguments {
-            arg.encode_into(&mut buf);
+            if !omitted_binary(prev, arg) {
+                arg.encode_into(&mut buf);
+            }
+            prev = Some(arg);
         }
         buf
     }
@@ -342,12 +424,22 @@ impl Message {
         let argc = argc as usize;
 
         // Argument-type blob: tagged binary field (12 bytes).
-        let (_argtypes, n) = Field::decode(buf, offset)?;
+        let (argtypes, n) = Field::decode(buf, offset)?;
         offset += n;
+        let argtypes = match argtypes {
+            Field::Binary(tags) => tags,
+            _ => Vec::new(),
+        };
 
         // Arguments themselves.
-        let mut arguments = Vec::with_capacity(argc);
-        for _ in 0..argc {
+        let mut arguments: Vec<Field> = Vec::with_capacity(argc);
+        for i in 0..argc {
+            let empty_binary = argtypes.get(i) == Some(&ARG_TAG_BINARY)
+                && omitted_binary(arguments.last(), &Field::Binary(Vec::new()));
+            if empty_binary {
+                arguments.push(Field::Binary(Vec::new()));
+                continue;
+            }
             let (field, consumed) = Field::decode(buf, offset)?;
             arguments.push(field);
             offset += consumed;
@@ -491,7 +583,7 @@ mod tests {
             vec![
                 Field::Number4(0x00000045),
                 Field::String("Hi".to_string()),
-                Field::Number1(ITEM_TITLE),
+                Field::Number4(ITEM_TITLE),
                 Field::Binary(vec![0x01, 0x02]),
             ],
         );
@@ -506,6 +598,28 @@ mod tests {
             &bytes[20..24],
             &[ARG_TAG_NUMBER, ARG_TAG_STRING, ARG_TAG_NUMBER, ARG_TAG_BINARY]
         );
+    }
+
+    #[test]
+    fn empty_binary_after_zero_length_is_not_sent() {
+        let m = Message::new(
+            9,
+            MSG_CUE_LIST_EXT,
+            vec![
+                Field::Number4(MSG_CUE_LIST_EXT_REQ.into()),
+                Field::Number4(0),
+                Field::Number4(0),
+                Field::Binary(Vec::new()),
+                Field::Number4(0),
+            ],
+        );
+        let bytes = m.encode();
+        // Header, then four 5-byte numbers: no binary field in between.
+        assert_eq!(bytes.len(), HEADER_LEN + 4 * 5);
+        assert_eq!(bytes[20 + 3], ARG_TAG_BINARY, "still listed in the type tags");
+        let (decoded, consumed) = Message::decode(&bytes).unwrap();
+        assert_eq!(decoded, m);
+        assert_eq!(consumed, bytes.len());
     }
 
     #[test]

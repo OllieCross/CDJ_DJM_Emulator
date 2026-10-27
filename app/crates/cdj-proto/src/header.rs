@@ -12,6 +12,10 @@ pub const DEVICE_NAME_LEN: usize = 20;
 pub const HEADER_PAD_BEFORE_NAME: u8 = 0x00;
 pub const HEADER_PAD_AFTER_NAME: u8 = 0x01;
 
+/// Neutral pitch (+0%, 1x speed) as carried in beat and status packets.
+/// `0x00000000` is -100%, `0x00200000` is +100%.
+pub const PITCH_NEUTRAL: u32 = 0x0010_0000;
+
 pub struct Magic;
 
 impl Magic {
@@ -157,6 +161,89 @@ impl Header {
     }
 }
 
+/// Kind bytes of packets on ports 50001 and 50002. Several values mean
+/// something else on port 50000 (0x02 is also claim stage 2), so these are
+/// raw bytes rather than [`PacketKind`] variants.
+pub mod update_kind {
+    pub const FADER_START: u8 = 0x02;
+    pub const CHANNELS_ON_AIR: u8 = 0x03;
+    pub const MEDIA_QUERY: u8 = 0x05;
+    pub const MEDIA_RESPONSE: u8 = 0x06;
+    pub const CDJ_STATUS: u8 = 0x0a;
+    pub const PRECISE_POSITION: u8 = 0x0b;
+    pub const LOAD_TRACK: u8 = 0x19;
+    pub const LOAD_TRACK_ACK: u8 = 0x1a;
+    pub const MASTER_HANDOFF_REQUEST: u8 = 0x26;
+    pub const MASTER_HANDOFF_RESPONSE: u8 = 0x27;
+    pub const BEAT: u8 = 0x28;
+    pub const MIXER_STATUS: u8 = 0x29;
+    pub const SYNC_CONTROL: u8 = 0x2a;
+}
+
+/// Header shared by the packets on ports 50001 and 50002 (beat, CDJ status,
+/// mixer status), matching beat-link's `DeviceUpdate` parser:
+///
+/// ```text
+/// 0x00..0x0a  magic ("Qspt1WmJOL")
+/// 0x0a        packet kind
+/// 0x0b..0x1f  device name (20 bytes, NUL-padded)
+/// 0x1f        0x01
+/// 0x20        subtype
+/// 0x21        device number  <- beat-link reads the sender's number here
+/// 0x22..0x24  bytes remaining after this field (total - 0x24), u16 BE
+/// ```
+///
+/// Unlike the port-50000 [`Header`], there is no `0x00` pad before the
+/// device name, so the name starts one byte earlier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateHeader {
+    /// One of the [`update_kind`] values.
+    pub kind: u8,
+    pub device_name: DeviceName,
+    pub subtype: u8,
+    pub device_number: u8,
+}
+
+impl UpdateHeader {
+    pub const ENCODED_LEN: usize = 0x24;
+
+    /// Write the header into the start of `packet`. `packet` must be the whole
+    /// packet: the length field is derived from `packet.len()`.
+    pub fn encode_into(&self, packet: &mut [u8]) -> Result<(), EncodeError> {
+        if packet.len() < Self::ENCODED_LEN {
+            return Err(EncodeError::BufferTooSmall);
+        }
+        let remaining = u16::try_from(packet.len() - Self::ENCODED_LEN)
+            .map_err(|_| EncodeError::BufferTooSmall)?;
+        packet[..MAGIC_LEN].copy_from_slice(&MAGIC);
+        packet[0x0a] = self.kind;
+        packet[0x0b..0x1f].copy_from_slice(self.device_name.as_bytes());
+        packet[0x1f] = HEADER_PAD_AFTER_NAME;
+        packet[0x20] = self.subtype;
+        packet[0x21] = self.device_number;
+        packet[0x22..0x24].copy_from_slice(&remaining.to_be_bytes());
+        Ok(())
+    }
+
+    pub fn decode(packet: &[u8]) -> Result<Self, DecodeError> {
+        if packet.len() < Self::ENCODED_LEN {
+            return Err(DecodeError::TooShort {
+                need: Self::ENCODED_LEN,
+                have: packet.len(),
+            });
+        }
+        Magic::validate(packet)?;
+        let mut name = [0u8; DEVICE_NAME_LEN];
+        name.copy_from_slice(&packet[0x0b..0x1f]);
+        Ok(Self {
+            kind: packet[0x0a],
+            device_name: DeviceName::from_bytes(&name),
+            subtype: packet[0x20],
+            device_number: packet[0x21],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +275,25 @@ mod tests {
         let mut buf = [0u8; Header::ENCODED_LEN];
         buf[..10].copy_from_slice(b"NotProDJLk");
         assert!(matches!(Header::decode(&buf), Err(DecodeError::BadMagic { .. })));
+    }
+
+    #[test]
+    fn update_header_matches_beatlink_device_update_layout() {
+        let h = UpdateHeader {
+            kind: update_kind::BEAT,
+            device_name: DeviceName::new("CDJ-3000").unwrap(),
+            subtype: 0x00,
+            device_number: 3,
+        };
+        let mut buf = [0u8; 0x60];
+        h.encode_into(&mut buf).unwrap();
+        // beat-link DeviceUpdate: name = String(bytes, 0x0b, 20).trim(),
+        // deviceNumber = bytes[0x21].
+        assert_eq!(&buf[0x0b..0x13], b"CDJ-3000");
+        assert_eq!(buf[0x1f], 0x01);
+        assert_eq!(buf[0x21], 3);
+        assert_eq!(&buf[0x22..0x24], &[0x00, 0x3c]);
+        assert_eq!(UpdateHeader::decode(&buf).unwrap(), h);
     }
 
     #[test]

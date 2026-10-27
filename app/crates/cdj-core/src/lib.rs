@@ -5,13 +5,17 @@
 //! this crate through a thin command layer; a headless CLI (`cdjd`) does the
 //! same for development and automated testing.
 
-pub mod audio;
-pub mod beat_clock;
 pub mod dbserver;
+pub mod deck;
+pub mod engine;
 pub mod library;
 pub mod feth;
+pub mod grid;
+pub mod link;
+pub mod media;
+pub mod mixer;
 pub mod net;
-pub mod orchestrator;
-pub mod player_state;
+pub mod rig;
+pub mod track_audio;
 pub mod virtual_cdj;
 pub mod virtual_djm;
