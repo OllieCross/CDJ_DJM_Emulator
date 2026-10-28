@@ -1,6 +1,6 @@
 //! Network interface discovery and UDP socket helpers.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
@@ -155,15 +155,4 @@ pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Resul
     sock.bind(&SocketAddr::V4(SocketAddrV4::new(local_ip, 0)).into())?;
     let std_sock: std::net::UdpSocket = sock.into();
     UdpSocket::from_std(std_sock)
-}
-
-pub fn broadcast_addr(iface: &Interface, port: u16) -> SocketAddr {
-    SocketAddr::V4(SocketAddrV4::new(iface.broadcast, port))
-}
-
-pub fn _ip_octets(ip: IpAddr) -> [u8; 4] {
-    match ip {
-        IpAddr::V4(v4) => v4.octets(),
-        IpAddr::V6(_) => [0; 4],
-    }
 }

@@ -11,6 +11,7 @@ use cdj_core::grid::BeatGrid;
 use cdj_core::library::{Library, TrackInfo};
 use cdj_core::media::{find_exports, MediaCatalog, Slot};
 use cdj_core::mixer::{CrossfaderAssign, MixerControls};
+use cdj_core::models::{MixerModel, PlayerModel};
 use cdj_core::rig::{Rig, RigConfig, MAX_PLAYERS};
 use clap::Parser;
 use serde::Serialize;
@@ -30,9 +31,6 @@ struct Args {
     library: Option<PathBuf>,
 }
 
-const PLAYER_MODEL: &str = "CDJ-3000";
-const MIXER_MODEL: &str = "DJM-V10";
-const MIXER_CHANNELS: u8 = 6;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const MEDIA_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const VOLUMES: &str = "/Volumes";
@@ -114,9 +112,6 @@ fn build_rig(plan: &FethPlan) -> Result<Rig, String> {
     Ok(Rig::new(RigConfig {
         topology,
         addressing,
-        player_model: PLAYER_MODEL.into(),
-        mixer_model: MIXER_MODEL.into(),
-        mixer_channels: MIXER_CHANNELS,
         initial_bpm_hundredths: 12000,
         beat_grid_offset_ms: 0,
     }))
@@ -210,14 +205,34 @@ struct PlayerView {
     loaded: Option<LoadedView>,
     /// What is in this player's slots (kept while it is off).
     media: Vec<SlotView>,
+    /// The model it runs as, while on.
+    model: Option<PlayerModel>,
+    model_name: Option<String>,
+    /// Hot cues this model has (3 or 8).
+    hot_cue_slots: usize,
 }
 
 #[derive(Serialize, Clone)]
 struct MixerView {
     running: bool,
-    model: String,
+    model: Option<MixerModel>,
+    model_name: Option<String>,
     channels: u8,
     controls: MixerControls,
+}
+
+#[derive(Serialize, Clone)]
+struct ModelInfo<M> {
+    id: M,
+    name: &'static str,
+    notes: &'static str,
+}
+
+/// The models players and the mixer can be switched on as.
+#[derive(Serialize, Clone)]
+struct ModelsView {
+    players: Vec<ModelInfo<PlayerModel>>,
+    mixers: Vec<ModelInfo<MixerModel>>,
 }
 
 /// An export that could go into a slot.
@@ -297,6 +312,7 @@ fn snapshot(state: &AppState) -> RigSnapshot {
                     number: n,
                     play_state: "Off".into(),
                     hot_cues: vec![None; HOT_CUES],
+                    hot_cue_slots: HOT_CUES,
                     media,
                     ..Default::default()
                 };
@@ -325,6 +341,9 @@ fn snapshot(state: &AppState) -> RigSnapshot {
                 length_ms: v.length_ms,
                 cue_ms: v.cue_ms,
                 hot_cues: v.hot_cues.to_vec(),
+                hot_cue_slots: deck.hot_cue_slots,
+                model: Some(h.model),
+                model_name: Some(h.model.display_name().into()),
                 memory_cues: v.memory_cues.clone(),
                 active_loop: v.active_loop,
                 loaded: v.loaded.as_ref().and_then(|t| {
@@ -365,8 +384,9 @@ fn snapshot(state: &AppState) -> RigSnapshot {
         players,
         mixer: MixerView {
             running: rig.as_ref().is_some_and(|r| r.mixer_running()),
-            model: MIXER_MODEL.into(),
-            channels: MIXER_CHANNELS,
+            model: rig.as_ref().and_then(|r| r.mixer_model()),
+            model_name: rig.as_ref().and_then(|r| r.mixer_model()).map(|m| m.device_name().into()),
+            channels: rig.as_ref().and_then(|r| r.mixer_model()).map_or(4, |m| m.channels()),
             controls: rig.as_ref().map(|r| r.mixer_controls()).unwrap_or_default(),
         },
         sources,
@@ -380,6 +400,28 @@ fn snapshot(state: &AppState) -> RigSnapshot {
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn models() -> ModelsView {
+    ModelsView {
+        players: PlayerModel::ALL
+            .into_iter()
+            .map(|m| ModelInfo {
+                id: m,
+                name: m.display_name(),
+                notes: m.notes(),
+            })
+            .collect(),
+        mixers: MixerModel::ALL
+            .into_iter()
+            .map(|m| ModelInfo {
+                id: m,
+                name: m.device_name(),
+                notes: m.notes(),
+            })
+            .collect(),
+    }
+}
 
 #[tauri::command]
 fn rig_snapshot(state: State<AppState>) -> RigSnapshot {
@@ -428,8 +470,8 @@ async fn network_teardown(state: State<'_, AppState>) -> Result<NetworkView, Str
 }
 
 #[tauri::command]
-async fn spawn_player(player: u8, state: State<'_, AppState>) -> Result<(), String> {
-    state.rig_or_create()?.spawn_player(player).await.map_err(err)
+async fn spawn_player(player: u8, model: PlayerModel, state: State<'_, AppState>) -> Result<(), String> {
+    state.rig_or_create()?.spawn_player(player, model).await.map_err(err)
 }
 
 #[tauri::command]
@@ -439,8 +481,8 @@ fn despawn_player(player: u8, state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn spawn_mixer(state: State<'_, AppState>) -> Result<(), String> {
-    state.rig_or_create()?.spawn_mixer().await.map_err(err)
+async fn spawn_mixer(model: MixerModel, state: State<'_, AppState>) -> Result<(), String> {
+    state.rig_or_create()?.spawn_mixer(model).await.map_err(err)
 }
 
 #[tauri::command]
@@ -859,6 +901,7 @@ fn main() -> anyhow::Result<()> {
             set_eq,
             set_master_level,
             audio_devices,
+            models,
             set_audio_output,
         ])
         .build(tauri::generate_context!())?

@@ -31,6 +31,7 @@ use tracing::{debug, info, trace, warn};
 use crate::deck::{Deck, DeckView};
 use crate::link::{DeviceLink, Port};
 use crate::media::{PlayerMedia, Slot};
+use crate::models::PlayerModel;
 use crate::rig::RigShared;
 
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(1500);
@@ -39,7 +40,7 @@ pub const POSITION_INTERVAL: Duration = Duration::from_millis(30);
 
 #[derive(Debug, Clone)]
 pub struct VirtualCdjConfig {
-    pub model_name: String,
+    pub model: PlayerModel,
     pub device_number: u8,
     pub mac: [u8; 6],
 }
@@ -57,11 +58,12 @@ impl VirtualCdj {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let device_name = DeviceName::new(&self.cfg.model_name)
+        let model = self.cfg.model;
+        let device_name = DeviceName::new(model.device_name())
             .map_err(|e| anyhow::anyhow!("device name invalid: {e}"))?;
         let number = self.cfg.device_number;
 
-        info!(device = %self.cfg.model_name, num = number, ip = %self.link.ip, "virtual CDJ starting claim sequence");
+        info!(device = model.device_name(), num = number, ip = %self.link.ip, "virtual CDJ starting claim sequence");
         claim(&self.link, &device_name, self.cfg.mac, number).await?;
         info!(num = number, "virtual CDJ online");
 
@@ -85,15 +87,17 @@ impl VirtualCdj {
                     counter = counter.wrapping_add(1);
                     let media = rig.media(number);
                     let status = current_status(
-                        &name,
-                        number,
+                        CdjStatus {
+                            firmware: model.firmware(),
+                            packet_counter: counter,
+                            ..CdjStatus::idle(name.clone(), number)
+                        },
                         &deck,
                         &deck.view(),
                         &media,
                         rig.link_media_available(number),
-                        counter,
                     );
-                    if let Err(e) = link.send_update(Port::Status, &status.encode()).await {
+                    if let Err(e) = link.send_update(Port::Status, &status.encode_len(model.status_len())).await {
                         warn!(num = number, "CDJ status broadcast failed: {e}");
                     }
                     debug!(num = number, counter, "status sent");
@@ -101,7 +105,8 @@ impl VirtualCdj {
             });
         }
 
-        {
+        // Only CDJ-3000-generation players send absolute positions.
+        if model.sends_position() {
             let (link, name, deck) = (self.link.clone(), device_name.clone(), self.deck.clone());
             tasks.spawn(async move {
                 let mut tick = time::interval(POSITION_INTERVAL);
@@ -220,15 +225,15 @@ pub(crate) async fn keep_alive_loop(
     }
 }
 
-/// The status packet for the deck's current state.
+/// The status packet for the deck's current state. `base` carries what
+/// doesn't come from the deck: who is sending (name, number, firmware) and
+/// the packet counter.
 fn current_status(
-    name: &DeviceName,
-    number: u8,
+    base: CdjStatus,
     deck: &Deck,
     view: &DeckView,
     media: &PlayerMedia,
     link_media_available: bool,
-    packet_counter: u32,
 ) -> CdjStatus {
     let loaded = view.loaded.as_ref();
     let moving = view.moving;
@@ -261,13 +266,12 @@ fn current_status(
         beat_number: beats_known.then(|| view.beat_number()),
         cue_countdown: view.cue_countdown,
         beat_within_bar: if beats_known { view.bar_beat } else { 0 },
-        packet_counter,
         active_loop: view.active_loop.map(|l| ActiveLoop {
             start_ms: l.start_ms as u32,
             end_ms: l.end_ms as u32,
             beats: l.beats.map_or(0, |b| b.round() as u16),
         }),
-        ..CdjStatus::idle(name.clone(), number)
+        ..base
     }
 }
 
@@ -298,11 +302,15 @@ mod tests {
     }
 
     fn deck(number: u8) -> Deck {
-        Deck::new(number, Arc::new(AudioEngine::new()), 12000)
+        Deck::new(number, Arc::new(AudioEngine::new()), 12000, crate::deck::HOT_CUES)
     }
 
     fn status(deck: &Deck, number: u8, link: bool) -> CdjStatus {
-        current_status(&name(), number, deck, &deck.view(), &PlayerMedia::default(), link, 1)
+        let base = CdjStatus {
+            packet_counter: 1,
+            ..CdjStatus::idle(name(), number)
+        };
+        current_status(base, deck, &deck.view(), &PlayerMedia::default(), link)
     }
 
     #[test]

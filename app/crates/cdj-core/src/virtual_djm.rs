@@ -12,15 +12,14 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::link::{DeviceLink, Port};
+use crate::models::MixerModel;
 use crate::rig::RigShared;
 use crate::virtual_cdj::{claim, keep_alive_loop, STATUS_INTERVAL};
 
 #[derive(Debug, Clone)]
 pub struct VirtualDjmConfig {
-    pub model_name: String,
+    pub model: MixerModel,
     pub mac: [u8; 6],
-    /// Mixer channels: 4, or 6 for the DJM-V10.
-    pub channels: u8,
 }
 
 pub struct VirtualDjm {
@@ -39,10 +38,10 @@ impl VirtualDjm {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let device_name = DeviceName::new(&self.cfg.model_name)
+        let device_name = DeviceName::new(self.cfg.model.device_name())
             .map_err(|e| anyhow::anyhow!("device name invalid: {e}"))?;
 
-        info!(device = %self.cfg.model_name, num = MIXER_NUM, ip = %self.link.ip, "virtual DJM starting claim sequence");
+        info!(device = self.cfg.model.device_name(), num = MIXER_NUM, ip = %self.link.ip, "virtual DJM starting claim sequence");
         claim(&self.link, &device_name, self.cfg.mac, MIXER_NUM).await?;
         info!(num = MIXER_NUM, "virtual DJM online");
 
@@ -57,7 +56,7 @@ impl VirtualDjm {
 
         let link = self.link.clone();
         let rig = self.rig.clone();
-        let channels = self.cfg.channels;
+        let channels = self.cfg.model.channels();
         tasks.spawn(async move {
             let mut tick = time::interval(STATUS_INTERVAL);
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);

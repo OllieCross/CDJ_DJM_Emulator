@@ -13,8 +13,13 @@ use crate::error::DecodeError;
 use crate::header::{update_kind, DeviceName, UpdateHeader, PITCH_NEUTRAL};
 
 /// CDJ-3000 status packets are 0x200 bytes (dysentery); older players send
-/// 0xd0 / 0xd4 / 0x11c.
+/// 0xd0 (pre-nexus), 0xd4 (nexus) or 0x11c (nexus 2). Fields keep their
+/// offsets; shorter packets just end earlier.
 pub const CDJ_STATUS_LEN: usize = 0x200;
+/// Shortest CDJ status packet (pre-nexus players).
+pub const CDJ_STATUS_MIN_LEN: usize = 0xd0;
+/// Packets at least this long carry the CDJ-3000 loop fields.
+const LOOP_FIELDS_END: usize = 0x1ca;
 pub const DJM_STATUS_LEN: usize = 0x38; // 56 bytes
 
 /// BPM is transmitted in hundredths: 120.00 -> 12000 -> 0x2EE0.
@@ -283,6 +288,17 @@ impl CdjStatus {
         }
     }
 
+    /// The packet as a player sending `len`-byte status packets sends it
+    /// (see [`CDJ_STATUS_LEN`]): the full layout cut to length, with the
+    /// length field to match.
+    pub fn encode_len(&self, len: usize) -> Vec<u8> {
+        let len = len.clamp(CDJ_STATUS_MIN_LEN, CDJ_STATUS_LEN);
+        let mut buf = self.encode()[..len].to_vec();
+        buf[0x22..0x24].copy_from_slice(&((len - UpdateHeader::ENCODED_LEN) as u16).to_be_bytes());
+        buf
+    }
+
+    /// A CDJ-3000 status packet.
     pub fn encode(&self) -> [u8; CDJ_STATUS_LEN] {
         let mut buf = [0u8; CDJ_STATUS_LEN];
         UpdateHeader {
@@ -336,10 +352,11 @@ impl CdjStatus {
         buf
     }
 
+    /// Any player's status packet (0xd0 bytes or longer).
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        if buf.len() < CDJ_STATUS_LEN {
+        if buf.len() < CDJ_STATUS_MIN_LEN {
             return Err(DecodeError::TooShort {
-                need: CDJ_STATUS_LEN,
+                need: CDJ_STATUS_MIN_LEN,
                 have: buf.len(),
             });
         }
@@ -351,8 +368,9 @@ impl CdjStatus {
         let bpm = u16_at(buf, 0x92);
         let beat = u32_at(buf, 0xa0);
         let cue = u16_at(buf, 0xa4);
-        let loop_start = u32_at(buf, 0x1b6);
-        let loop_end = u32_at(buf, 0x1be);
+        let has_loop = buf.len() >= LOOP_FIELDS_END;
+        let loop_start = if has_loop { u32_at(buf, 0x1b6) } else { 0 };
+        let loop_end = if has_loop { u32_at(buf, 0x1be) } else { 0 };
         let mut firmware = [0u8; 4];
         firmware.copy_from_slice(&buf[0x7c..0x80]);
         Ok(Self {
@@ -578,6 +596,23 @@ mod tests {
         assert_eq!(&b[0x1be..0x1c2], &2000u32.to_be_bytes());
         assert_eq!(&b[0x1c8..0x1ca], &4u16.to_be_bytes());
         assert_eq!(CdjStatus::decode(&b).unwrap(), s);
+    }
+
+    #[test]
+    fn older_players_send_shorter_packets() {
+        let s = loaded(2);
+        for len in [0xd0, 0xd4, 0x11c] {
+            let b = s.encode_len(len);
+            assert_eq!(b.len(), len);
+            assert_eq!(&b[0x22..0x24], &((len - 0x24) as u16).to_be_bytes());
+            assert_eq!(&b[..0x22], &s.encode()[..0x22]);
+            assert_eq!(&b[0x24..0xcc], &s.encode()[0x24..0xcc], "shared fields at the same offsets");
+            let d = CdjStatus::decode(&b).unwrap();
+            assert_eq!(d.rekordbox_id, 42);
+            assert_eq!(d.beat_number, Some(256));
+            assert_eq!(d.active_loop, None, "no loop fields before the CDJ-3000");
+        }
+        assert!(CdjStatus::decode(&s.encode_len(0xd0)[..0xcf]).is_err());
     }
 
     #[test]

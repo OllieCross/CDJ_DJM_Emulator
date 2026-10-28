@@ -1,0 +1,24 @@
+#[test]
+#[allow(non_snake_case)]
+fn pdb_{name}() {{
+    println!("Parsing file: {filepath}");
+    let data = include_bytes!("{filepath}").as_slice();
+    let mut reader = Cursor::new(data);
+    let header = Header::read(&mut reader).expect("failed to parse header");
+    println!("{{:#?}}", header);
+
+    for (i, table) in header.tables.iter().enumerate() {{
+        println!("Table {{}}: {{:?}}", i, table.page_type);
+        let pages = header.read_pages(
+                &mut reader,
+                binrw::Endian::NATIVE,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("failed to read pages");
+
+        for page in pages.into_iter() {{
+            println!("  {{:?}}", page);
+        }}
+    }}
+
+}}

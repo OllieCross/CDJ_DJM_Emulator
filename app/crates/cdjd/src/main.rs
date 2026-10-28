@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use cdj_core::feth::{setup_plan, FethPlan, Layout};
 use cdj_core::media::{Medium, Slot};
+use cdj_core::models::{MixerModel, PlayerModel};
 use cdj_core::net::Interface;
 use cdj_core::rig::{Rig, RigConfig};
 use cdj_proto::announce::MIXER_NUM;
@@ -88,10 +89,12 @@ enum Cmd {
         /// Omit the virtual DJM.
         #[arg(long)]
         no_mixer: bool,
-        #[arg(long, default_value = "CDJ-3000")]
-        player_model: String,
-        #[arg(long, default_value = "DJM-V10")]
-        mixer_model: String,
+        /// Player models, one per player (the last repeats): e.g.
+        /// CDJ-3000X,CDJ-3000X,CDJ-2000NXS2. See `cdjd models`.
+        #[arg(long, default_value = "CDJ-3000", value_delimiter = ',', value_parser = player_model)]
+        player_model: Vec<PlayerModel>,
+        #[arg(long, default_value = "DJM-V10", value_parser = mixer_model)]
+        mixer_model: MixerModel,
         /// Initial tempo in BPM (e.g. 128.0).
         #[arg(long, default_value_t = 120.0)]
         bpm: f32,
@@ -128,16 +131,31 @@ enum Cmd {
         net: NetArgs,
         #[arg(short = 'n', long, default_value_t = 1)]
         device_number: u8,
-        #[arg(short, long, default_value = "CDJ-3000")]
-        model: String,
+        #[arg(short, long, default_value = "CDJ-3000", value_parser = player_model)]
+        model: PlayerModel,
     },
+
+    /// List the player and mixer models the emulator can be.
+    Models,
+}
+
+fn player_model(name: &str) -> Result<PlayerModel, String> {
+    PlayerModel::from_name(name).ok_or_else(|| {
+        format!("unknown player model; choose from {}", PlayerModel::ALL.map(|m| m.display_name()).join(", "))
+    })
+}
+
+fn mixer_model(name: &str) -> Result<MixerModel, String> {
+    MixerModel::from_name(name).ok_or_else(|| {
+        format!("unknown mixer model; choose from {}", MixerModel::ALL.map(|m| m.device_name()).join(", "))
+    })
 }
 
 fn bpm_to_hundredths(bpm: f32) -> u16 {
     (bpm * 100.0).round().clamp(0.0, u16::MAX as f32) as u16
 }
 
-fn rig_config(net: &NetArgs, player_model: String, mixer_model: String) -> Result<RigConfig> {
+fn rig_config(net: &NetArgs) -> Result<RigConfig> {
     let plan = net.plan();
     let status = plan.status();
     if !status.ready() {
@@ -146,13 +164,9 @@ fn rig_config(net: &NetArgs, player_model: String, mixer_model: String) -> Resul
         );
     }
     let (topology, addressing) = plan.rig_network()?;
-    let mixer_channels = if mixer_model == "DJM-V10" { 6 } else { 4 };
     Ok(RigConfig {
         topology,
         addressing,
-        player_model,
-        mixer_model,
-        mixer_channels,
         initial_bpm_hundredths: 12000,
         beat_grid_offset_ms: 0,
     })
@@ -217,7 +231,7 @@ async fn main() -> Result<()> {
             silent,
             library,
         } => {
-            let mut cfg = rig_config(&net, player_model, mixer_model)?;
+            let mut cfg = rig_config(&net)?;
             cfg.initial_bpm_hundredths = bpm_to_hundredths(bpm);
             cfg.beat_grid_offset_ms = beat_offset_ms;
 
@@ -229,10 +243,15 @@ async fn main() -> Result<()> {
                 }
             }
             for n in 1..=players.min(4) {
-                rig.spawn_player(n).await?;
+                let model = player_model
+                    .get(usize::from(n - 1))
+                    .or(player_model.last())
+                    .copied()
+                    .unwrap_or(PlayerModel::Cdj3000);
+                rig.spawn_player(n, model).await?;
             }
             if !no_mixer {
-                rig.spawn_mixer().await?;
+                rig.spawn_mixer(mixer_model).await?;
             }
             if let Some(root) = library {
                 let medium = tokio::task::spawn_blocking(move || Medium::open(&root))
@@ -256,6 +275,16 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
             rig.shutdown();
         }
+        Cmd::Models => {
+            println!("Players:");
+            for m in PlayerModel::ALL {
+                println!("  {:<14} {}", m.display_name(), m.notes());
+            }
+            println!("Mixers:");
+            for m in MixerModel::ALL {
+                println!("  {:<14} {}", m.device_name(), m.notes());
+            }
+        }
         Cmd::AudioDevices => {
             for name in cdj_core::engine::AudioEngine::output_devices() {
                 println!("{name}");
@@ -266,8 +295,8 @@ async fn main() -> Result<()> {
             device_number,
             model,
         } => {
-            let rig = Rig::new(rig_config(&net, model, "DJM-V10".into())?);
-            rig.spawn_player(device_number).await?;
+            let rig = Rig::new(rig_config(&net)?);
+            rig.spawn_player(device_number, model).await?;
             println!("player {device_number} running; Ctrl-C to stop");
             tokio::signal::ctrl_c().await?;
             rig.shutdown();

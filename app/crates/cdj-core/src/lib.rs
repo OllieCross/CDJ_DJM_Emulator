@@ -14,6 +14,7 @@ pub mod grid;
 pub mod link;
 pub mod media;
 pub mod mixer;
+pub mod models;
 pub mod net;
 pub mod rig;
 pub mod track_audio;

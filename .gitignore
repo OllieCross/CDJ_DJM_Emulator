@@ -2,8 +2,6 @@
 app/target/
 **/target/
 
-# Vendored crates (patched locally, rebuilt from source)
-app/vendor/
 
 # Tauri generated files and build output
 ui/src-tauri/gen/

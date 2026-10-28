@@ -1,0 +1,37 @@
+[package]
+name = "rekordcrate"
+version = "0.3.0"
+authors = ["Jan Holthuis <jan.holthuis@ruhr-uni-bochum.de>"]
+description = "Library for parsing Pioneer Rekordbox device exports"
+readme = "README.md"
+repository = "https://github.com/Holzhaus/rekordcrate"
+license = "MPL-2.0"
+keywords = ["rekordbox", "dj", "export", "database", "parser"]
+categories = ["parser-implementations"]
+edition = "2021"
+exclude = [".*"]
+
+[dependencies]
+binrw = "0.14"
+modular-bitfield = "0.11"
+crc16 = "0.4"
+clap = { version = "4.5", features = ["derive"], optional = true }
+parse-display = "0.10"
+thiserror = "2.0"
+quick-xml = { version = "0.37.2", features = ["serialize", "serde-types"] }
+serde = { version = "1.0", features = ["derive"] }
+chrono = "0.4"
+[build-dependencies]
+glob = "0.3"
+
+[dev-dependencies]
+pretty-hex = "0.4"
+pretty_assertions = "1"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "rekordcrate"
+required-features = ["cli"]

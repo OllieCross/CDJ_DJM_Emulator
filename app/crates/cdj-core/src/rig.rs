@@ -24,6 +24,7 @@ use crate::grid::BeatGrid;
 use crate::link::{DeviceLink, Topology};
 use crate::media::{Medium, PlayerMedia, Slot};
 use crate::mixer::{CrossfaderAssign, MixerControls, MAX_CHANNELS};
+use crate::models::{MixerModel, PlayerModel};
 use crate::track_audio::TrackAudio;
 use crate::virtual_cdj::{VirtualCdj, VirtualCdjConfig};
 use crate::virtual_djm::{VirtualDjm, VirtualDjmConfig};
@@ -47,10 +48,6 @@ pub enum Addressing {
 pub struct RigConfig {
     pub topology: Topology,
     pub addressing: Addressing,
-    pub player_model: String,
-    pub mixer_model: String,
-    /// Mixer channels: 4, or 6 for the DJM-V10.
-    pub mixer_channels: u8,
     /// Tempo of an empty deck (timecode without a track).
     pub initial_bpm_hundredths: u16,
     /// Where beat 1 falls in files played without rekordbox analysis.
@@ -142,6 +139,7 @@ impl RigShared {
 #[derive(Clone)]
 pub struct PlayerHandle {
     pub player_number: u8,
+    pub model: PlayerModel,
     pub deck: Arc<Deck>,
 }
 
@@ -173,7 +171,7 @@ pub struct Rig {
     mac: [u8; 6],
     shared: Arc<RigShared>,
     players: Mutex<BTreeMap<u8, (PlayerHandle, Running)>>,
-    mixer: Mutex<Option<Running>>,
+    mixer: Mutex<Option<(MixerModel, Running)>>,
 }
 
 impl Rig {
@@ -245,7 +243,8 @@ impl Rig {
 
     // ---------- lifecycle ----------
 
-    pub async fn spawn_player(&self, n: u8) -> anyhow::Result<()> {
+    /// Switch on player `n` as `model`.
+    pub async fn spawn_player(&self, n: u8, model: PlayerModel) -> anyhow::Result<()> {
         if !(1..=MAX_PLAYERS).contains(&n) {
             bail!("player number must be 1..={MAX_PLAYERS}, got {n}");
         }
@@ -257,10 +256,15 @@ impl Rig {
             .await
             .with_context(|| format!("binding player {n} to {ip} (is the network set up?)"))?;
 
-        let deck = Arc::new(Deck::new(n, self.shared.engine.clone(), self.cfg.initial_bpm_hundredths));
+        let deck = Arc::new(Deck::new(
+            n,
+            self.shared.engine.clone(),
+            self.cfg.initial_bpm_hundredths,
+            model.hot_cues(),
+        ));
         let cdj = VirtualCdj::new(
             VirtualCdjConfig {
-                model_name: self.cfg.player_model.clone(),
+                model,
                 device_number: n,
                 mac: self.device_mac(n),
             },
@@ -273,7 +277,7 @@ impl Rig {
                 device_number: n,
                 ip,
                 tcp_port: crate::dbserver::DBSERVER_TCP_PORT,
-                player_model: self.cfg.player_model.clone(),
+                player_model: model.device_name().into(),
             },
             self.shared.media(n),
         );
@@ -284,6 +288,7 @@ impl Rig {
 
         let handle = PlayerHandle {
             player_number: n,
+            model,
             deck: deck.clone(),
         };
         {
@@ -296,7 +301,7 @@ impl Rig {
         self.shared.players.write().unwrap().insert(n, deck);
         self.update_peers_seen();
         self.shared.refresh_mixer();
-        info!(player = n, %ip, "player spawned");
+        info!(player = n, model = model.display_name(), %ip, "player spawned");
         Ok(())
     }
 
@@ -314,7 +319,8 @@ impl Rig {
         true
     }
 
-    pub async fn spawn_mixer(&self) -> anyhow::Result<()> {
+    /// Switch on the mixer as `model`.
+    pub async fn spawn_mixer(&self, model: MixerModel) -> anyhow::Result<()> {
         if self.mixer_running() {
             bail!("the mixer is already running");
         }
@@ -324,9 +330,8 @@ impl Rig {
             .with_context(|| format!("binding the mixer to {ip} (is the network set up?)"))?;
         let djm = VirtualDjm::new(
             VirtualDjmConfig {
-                model_name: self.cfg.mixer_model.clone(),
+                model,
                 mac: self.device_mac(MIXER_NUM),
-                channels: self.cfg.mixer_channels,
             },
             Arc::new(link),
             self.shared.clone(),
@@ -337,18 +342,18 @@ impl Rig {
             if mixer.is_some() {
                 bail!("the mixer is already running");
             }
-            *mixer = Some(running);
+            *mixer = Some((model, running));
         }
         self.shared.mixer_running.store(true, Ordering::Relaxed);
         self.update_peers_seen();
         self.shared.refresh_mixer();
-        info!(%ip, "mixer spawned");
+        info!(model = model.device_name(), %ip, "mixer spawned");
         Ok(())
     }
 
     /// Switch the mixer off. Returns false if it wasn't running.
     pub fn despawn_mixer(&self) -> bool {
-        let Some(running) = self.mixer.lock().unwrap().take() else {
+        let Some((_, running)) = self.mixer.lock().unwrap().take() else {
             return false;
         };
         drop(running);
@@ -370,6 +375,11 @@ impl Rig {
 
     pub fn mixer_running(&self) -> bool {
         self.mixer.lock().unwrap().is_some()
+    }
+
+    /// The running mixer's model.
+    pub fn mixer_model(&self) -> Option<MixerModel> {
+        self.mixer.lock().unwrap().as_ref().map(|(m, _)| *m)
     }
 
     pub fn player(&self, n: u8) -> Option<PlayerHandle> {
@@ -763,9 +773,6 @@ mod tests {
                 peers: vec![],
             },
             addressing: Addressing::Fixed(Ipv4Addr::LOCALHOST),
-            player_model: "CDJ-3000".into(),
-            mixer_model: "DJM-V10".into(),
-            mixer_channels: 6,
             initial_bpm_hundredths: 12000,
             beat_grid_offset_ms: 0,
         })
@@ -791,10 +798,10 @@ mod tests {
     #[tokio::test]
     async fn spawn_play_and_despawn_players() {
         let r = rig();
-        r.spawn_player(1).await.unwrap();
-        r.spawn_player(2).await.unwrap();
-        assert!(r.spawn_player(2).await.is_err(), "number already taken");
-        assert!(r.spawn_player(5).await.is_err(), "only 4 players");
+        r.spawn_player(1, PlayerModel::Cdj3000).await.unwrap();
+        r.spawn_player(2, PlayerModel::Cdj3000).await.unwrap();
+        assert!(r.spawn_player(2, PlayerModel::Cdj3000).await.is_err(), "number already taken");
+        assert!(r.spawn_player(5, PlayerModel::Cdj3000).await.is_err(), "only 4 players");
 
         r.play(2).unwrap();
         let p2 = r.player(2).unwrap().deck;
@@ -811,6 +818,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn players_and_mixer_run_as_the_chosen_models() {
+        let r = rig();
+        r.spawn_player(3, PlayerModel::Cdj2000Nxs).await.unwrap();
+        let h = r.player(3).unwrap();
+        assert_eq!(h.model, PlayerModel::Cdj2000Nxs);
+        assert_eq!(h.deck.hot_cue_slots, 3);
+        assert_eq!(r.mixer_model(), None);
+        r.spawn_mixer(MixerModel::DjmA9).await.unwrap();
+        assert_eq!(r.mixer_model(), Some(MixerModel::DjmA9));
+        r.despawn_mixer();
+        assert_eq!(r.mixer_model(), None);
+    }
+
+    #[tokio::test]
     async fn media_slots_and_linked_loading() {
         use crate::library::tests::{demo_export, demo_library};
         let r = rig();
@@ -823,11 +844,11 @@ mod tests {
         assert!(r.insert_media(2, Slot::Sd, usb.clone()).is_err(), "one place at a time");
         assert!(r.insert_media(5, Slot::Usb, usb.clone()).is_err());
 
-        r.spawn_player(2).await.unwrap();
+        r.spawn_player(2, PlayerModel::Cdj3000).await.unwrap();
         let err = r.load_track(2, 1, Slot::Usb, track.id).await.unwrap_err();
         assert!(err.to_string().contains("off"), "player 1 must be on to share its USB: {err}");
 
-        r.spawn_player(1).await.unwrap();
+        r.spawn_player(1, PlayerModel::Cdj3000).await.unwrap();
         assert!(r.load_track(2, 1, Slot::Sd, track.id).await.is_err(), "SD slot is empty");
         // The demo export has no audio files, so this is a metadata-only load.
         r.load_track(2, 1, Slot::Usb, track.id).await.unwrap();
@@ -848,14 +869,14 @@ mod tests {
     #[tokio::test]
     async fn mixer_drives_on_air_and_gains() {
         let r = rig();
-        r.spawn_player(1).await.unwrap();
-        r.spawn_player(2).await.unwrap();
+        r.spawn_player(1, PlayerModel::Cdj3000).await.unwrap();
+        r.spawn_player(2, PlayerModel::Cdj3000).await.unwrap();
         let (p1, p2) = (r.player(1).unwrap().deck, r.player(2).unwrap().deck);
         assert!(!p1.on_air(), "nothing is on air without a mixer");
         r.set_channel_fader(2, 0.0).unwrap();
         assert_eq!(r.shared.engine.gains().channels[1].level.get(), 1.0, "no mixer: straight out");
 
-        r.spawn_mixer().await.unwrap();
+        r.spawn_mixer(MixerModel::DjmV10).await.unwrap();
         assert!(p1.on_air() && !p2.on_air());
         assert_eq!(r.shared.engine.gains().channels[1].level.get(), 0.0);
 
@@ -884,7 +905,7 @@ mod tests {
         // Unicast "broadcasts" to ourselves: loopback has no broadcast.
         cfg.topology.broadcast = Ipv4Addr::LOCALHOST;
         let r = Rig::new(cfg);
-        r.spawn_player(1).await.unwrap();
+        r.spawn_player(1, PlayerModel::Cdj3000).await.unwrap();
         let deck = r.player(1).unwrap().deck;
         deck.load(crate::deck::tests::test_track(), None, BeatGrid::constant(12000, 0.0), &[], None);
         r.play(1).unwrap();
@@ -919,8 +940,8 @@ mod tests {
     #[tokio::test]
     async fn sync_follows_the_master_tempo() {
         let r = rig();
-        r.spawn_player(1).await.unwrap();
-        r.spawn_player(2).await.unwrap();
+        r.spawn_player(1, PlayerModel::Cdj3000).await.unwrap();
+        r.spawn_player(2, PlayerModel::Cdj3000).await.unwrap();
         let grid = || BeatGrid::constant(12000, 0.0);
         let (p1, p2) = (r.player(1).unwrap().deck, r.player(2).unwrap().deck);
         p1.load(crate::deck::tests::test_track(), None, BeatGrid::constant(12500, 0.0), &[], None);

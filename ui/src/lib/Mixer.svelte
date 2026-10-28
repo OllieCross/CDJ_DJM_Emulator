@@ -3,16 +3,19 @@
   import Fader from "./Fader.svelte";
   import Icon from "./Icon.svelte";
   import Knob from "./Knob.svelte";
+  import { DEFAULT_MIXER_MODEL, rememberModel, rememberedModel, type ModelInfo } from "./models";
   import type { AudioView, CrossfaderAssign, MixerView, PlayerView } from "./types";
 
   let {
     mixer,
+    models,
     players,
     audio,
     networkReady,
     run,
   }: {
     mixer: MixerView;
+    models: ModelInfo[];
     players: PlayerView[];
     audio: AudioView;
     networkReady: boolean;
@@ -29,6 +32,14 @@
     [0, "LOW"],
   ];
   const EQ_KILL = -26;
+
+  let chosenModel = $state(rememberedModel("mixer", DEFAULT_MIXER_MODEL));
+  const chosenInfo = $derived(models.find((m) => m.id === chosenModel));
+
+  function powerOn() {
+    rememberModel("mixer", chosenModel);
+    run("spawn_mixer", { model: chosenModel });
+  }
 
   let devices = $state<string[]>([]);
   $effect(refreshDevices);
@@ -58,15 +69,23 @@
 
 <section class="djm">
   <div class="top">
-    <span class="title">{mixer.model}</span>
-    <span class="hint">{mixer.running ? "" : "off: decks play straight out"}</span>
+    {#if mixer.running}
+      <span class="title">{mixer.model_name}</span>
+    {:else}
+      <select class="model" bind:value={chosenModel} aria-label="Mixer model" title={chosenInfo?.notes}>
+        {#each models as m (m.id)}
+          <option value={m.id}>{m.name}</option>
+        {/each}
+      </select>
+      <span class="hint">off: decks play straight out</span>
+    {/if}
     <span class="spacer"></span>
     <button
       class="power"
       class:on={mixer.running}
       disabled={!mixer.running && !networkReady}
       title={mixer.running ? "Power off" : "Power on"}
-      onclick={() => run(mixer.running ? "despawn_mixer" : "spawn_mixer")}
+      onclick={() => (mixer.running ? run("despawn_mixer") : powerOn())}
     >
       <Icon name="power" size={13} />
     </button>
@@ -179,6 +198,16 @@
     font-weight: 800;
     letter-spacing: 0.12em;
     color: #d0d0d6;
+  }
+
+  .model {
+    background: #15151a;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font: inherit;
+    font-weight: 700;
+    padding: 2px 4px;
   }
 
   .hint {

@@ -23,6 +23,21 @@ const TRACKS: TrackSummary[] = [
   { id: 6, title: "Hollow Bodies", artist: "Ines Varga", album: "Hollow Bodies", bpm: 130, duration_s: 356, key: "9A" },
 ];
 
+const PLAYER_MODELS = [
+  { id: "Cdj3000", name: "CDJ-3000", notes: "", hotCues: 8 },
+  { id: "Cdj3000X", name: "CDJ-3000X", notes: "Treated like a CDJ-3000; its name on the network is unverified.", hotCues: 8 },
+  { id: "Cdj2000Nxs2", name: "CDJ-2000NXS2", notes: "No absolute-position packets.", hotCues: 8 },
+  { id: "Cdj2000Nxs", name: "CDJ-2000NXS", notes: "3 hot cues, no absolute-position packets.", hotCues: 3 },
+  { id: "Cdj2000", name: "CDJ-2000", notes: "Pre-nexus: 3 hot cues, no absolute-position packets.", hotCues: 3 },
+  { id: "Xdj1000Mk2", name: "XDJ-1000MK2", notes: "Status packet length unverified.", hotCues: 8 },
+];
+const MIXER_MODELS = [
+  { id: "DjmV10", name: "DJM-V10", notes: "6 channels; the emulator's EQ is 3-band (the V10 has 4).", channels: 6 },
+  { id: "DjmA9", name: "DJM-A9", notes: "", channels: 4 },
+  { id: "Djm900Nxs2", name: "DJM-900NXS2", notes: "", channels: 4 },
+  { id: "Djm750Mk2", name: "DJM-750MK2", notes: "", channels: 4 },
+];
+
 const CONTENTS: MediaContents = {
   name: "DEMO_USB",
   tracks: TRACKS,
@@ -60,6 +75,9 @@ function emptyPlayer(n: number): PlayerView {
     active_loop: null,
     loaded: null,
     media: [],
+    model: null,
+    model_name: null,
+    hot_cue_slots: 8,
   };
 }
 
@@ -77,7 +95,8 @@ const state: RigSnapshot = {
   players: [1, 2, 3, 4].map(emptyPlayer),
   mixer: {
     running: true,
-    model: "DJM-V10",
+    model: "DjmV10",
+    model_name: "DJM-V10",
     channels: 6,
     controls: {
       channel_faders: [1, 1, 0.8, 0, 1, 1],
@@ -130,16 +149,24 @@ function load(n: number, id: number, source: number, slot: Slot) {
   });
 }
 
-function power(n: number, on: boolean) {
+function power(n: number, on: boolean, modelId = "Cdj3000") {
   const p = player(n);
   const media = p.media;
-  Object.assign(p, emptyPlayer(n), { media, running: on, play_state: on ? "NoTrack" : "Off" });
+  const model = PLAYER_MODELS.find((m) => m.id === modelId) ?? PLAYER_MODELS[0];
+  Object.assign(p, emptyPlayer(n), {
+    media,
+    running: on,
+    play_state: on ? "NoTrack" : "Off",
+    model: on ? model.id : null,
+    model_name: on ? model.name : null,
+    hot_cue_slots: on ? model.hotCues : 8,
+  });
 }
 
 // Demo rig: players 1-3 on, 1 and 2 loaded, 1 playing as master.
-power(1, true);
-power(2, true);
-power(3, true);
+power(1, true, "Cdj3000X");
+power(2, true, "Cdj3000X");
+power(3, true, "Cdj2000Nxs");
 player(1).media = [{ slot: "Usb", name: "DEMO_USB", root: "/Volumes/DEMO_USB" }];
 load(1, 1, 1, "Usb");
 load(2, 2, 1, "Usb");
@@ -217,14 +244,21 @@ function handle(cmd: string, a: Args = {}): unknown {
     case "rig_snapshot":
       return structuredClone(state);
     case "spawn_player":
-      return power(a.player, true);
+      return power(a.player, true, a.model);
     case "despawn_player":
       return power(a.player, false);
-    case "spawn_mixer":
-      state.mixer.running = true;
+    case "spawn_mixer": {
+      const m = MIXER_MODELS.find((x) => x.id === a.model) ?? MIXER_MODELS[0];
+      Object.assign(state.mixer, { running: true, model: m.id, model_name: m.name, channels: m.channels });
       return;
+    }
+    case "models":
+      return {
+        players: PLAYER_MODELS.map(({ id, name, notes }) => ({ id, name, notes })),
+        mixers: MIXER_MODELS.map(({ id, name, notes }) => ({ id, name, notes })),
+      };
     case "despawn_mixer":
-      state.mixer.running = false;
+      Object.assign(state.mixer, { running: false, model: null, model_name: null });
       return;
     case "media_contents":
       return CONTENTS;
@@ -239,7 +273,7 @@ function handle(cmd: string, a: Args = {}): unknown {
     case "eject_media":
       p!.media = p!.media.filter((m) => m.slot !== a.slot);
       state.sources.forEach((s) => {
-        if (s.inserted?.[0] === a.player && s.inserted[1] === a.slot) s.inserted = null;
+        if (s.inserted && s.inserted[0] === a.player && s.inserted[1] === a.slot) s.inserted = null;
       });
       return;
     case "play_pause":

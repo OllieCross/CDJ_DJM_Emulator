@@ -2,22 +2,169 @@
 
 ## **! fully vibe-coded with claude code !**
 
-A macOS-first emulator of a Pioneer / AlphaTheta CDJ + DJM Pro DJ Link setup.
-Stands up to 4 virtual CDJ-3000 players and 1 virtual DJM on a software LAN
-so that tools like **ShowKontrol**, **Beat Link Trigger**, **rekordbox**, and
-other Pro DJ Link consumers see a credible CDJ setup without any physical
-hardware.
+A macOS app that runs up to 4 virtual CDJ players and 1 virtual DJM mixer
+on a Pro DJ Link network inside your Mac, so that **ShowKontrol**, **Beat Link
+Trigger** and other Pro DJ Link software see a credible DJ setup without any
+physical hardware. Decks load tracks from rekordbox USB/SD exports, play them
+through a virtual mixer, and report everything (status, beats, playhead, track
+metadata, waveforms) on the network the way real players do.
 
-**North-star use case:** a smaller rental company pre-visualising timecode
-shows against individual tracks without owning or renting four CDJs and a DJM.
+**North-star use case:** a smaller rental company programming timecode,
+lighting or video shows against individual tracks without owning or renting
+four CDJs and a DJM.
 
-> Status: **pre-alpha, M3 in progress.** 4-CDJ + 1-DJM fleet, full Pro DJ
-> Link protocol, per-player audio decode (Symphonia) + CoreAudio output
-> (CPAL), beat clock phase-locked to the audio playhead, and a working
-> **dbserver** that serves track metadata, waveform previews, beat grids,
-> and album art to Beat Link Trigger / ShowKontrol. Pass `--library` to load
-> a real Rekordbox USB export and get exact, per-track ANLZ data instead of
-> synthesised waveforms.
+> Status: **pre-alpha.** Verified against Beat Link Trigger's own code
+> (beat-link) on the live virtual network: it sees all players and the mixer,
+> their status, beats, positions and mixer data, and fetches track metadata,
+> beat grids and waveforms from the players. **Not yet checked with
+> ShowKontrol or against captures of real gear.**
+
+## What it does
+
+- **Rig:** switch players 1-4 and the mixer on and off at runtime, each as
+  the model you pick. Each device announces itself and sends status, beats
+  and (CDJ-3000 style) absolute-position packets from its own address.
+- **Models:** players can be a CDJ-3000, CDJ-3000X, CDJ-2000NXS2,
+  CDJ-2000NXS, CDJ-2000 or XDJ-1000MK2; the mixer a DJM-V10, DJM-A9,
+  DJM-900NXS2 or DJM-750MK2. What changes per model is what's publicly
+  known to differ on the network: the device name, the status packet length
+  (0x200 / 0x11c / 0xd4 / 0xd0), absolute-position packets (CDJ-3000s only),
+  3 or 8 hot cues, and 4 or 6 mixer channels. `cdjd models` lists what is
+  still a guess (e.g. the CDJ-3000X's exact name on the network).
+- **Media:** every player has a USB and an SD slot. Exports on mounted drives
+  (`/Volumes`) are found automatically; folders can be added. Any player can
+  load from any other player's media over LINK.
+- **Decks:** CUE (with hold-to-preview), hot cues A-H and memory cues from
+  rekordbox, beat loops and manual loops, tempo fader with ±6/10/16/WIDE,
+  master tempo (key lock), reverse, quantize, sync and tempo master, needle
+  search and jog wheel. Beats follow the track's rekordbox beat grid and each
+  beat packet is sent when that beat is heard.
+- **Mixer:** trim, 3-band EQ with kill, channel faders, crossfader with A/THRU/B
+  assign, master level; on-air state goes out to players and clients. Audio
+  plays through one output device of your choice (or none).
+- **dbserver:** answers metadata, artwork, beat grid, cue, waveform and
+  analysis-tag requests and menu browsing for the media in each player.
+
+## Requirements
+
+- macOS (Apple Silicon or Intel), an administrator password (for the virtual
+  network).
+- Rust 1.77+, Node.js 20.19+ and the Xcode Command Line Tools (the
+  time-stretcher is C++) to build.
+- Optional: Java 17+ and [Beat Link Trigger](https://github.com/Deep-Symmetry/beat-link-trigger)
+  (for the cross-check tests and the probe), Wireshark (for captures).
+
+## Run the app
+
+```sh
+npm --prefix ui install
+npm --prefix ui run tauri dev
+```
+
+Then, in the app:
+
+1. **Set up network** (top bar). macOS asks for an administrator password
+   once; this creates the virtual cable (`feth0`/`feth1`, see below).
+2. Pick a model and **power on** each player and the mixer.
+3. **Insert** a rekordbox export into a player's USB or SD slot (drives under
+   `/Volumes` are listed; **+ FOLDER** in BROWSE adds any export folder).
+4. In **BROWSE**, pick a track and **LOAD TO** a player, then play it.
+5. Point ShowKontrol / Beat Link Trigger at the interface **feth1**
+   (`10.77.77.200`). Pick an audio output under the mixer's **OUT**.
+
+`npm --prefix ui run dev` opens the UI in a normal browser against a mock
+backend (demo decks, no network or audio) for working on the interface.
+
+## Command line
+
+```sh
+cd app
+cargo run --bin cdjd -- net-up              # create the virtual network (admin prompt)
+cargo run --bin cdjd -- run-fleet --library /Volumes/MY_USB
+cargo run --bin cdjd -- run-fleet --autoplay --silent   # timecode only, no tracks
+cargo run --bin cdjd -- run-fleet --player-model CDJ-3000X,CDJ-3000X,CDJ-2000NXS2 --mixer-model DJM-A9
+cargo run --bin cdjd -- models              # player and mixer models
+cargo run --bin cdjd -- audio-devices       # list outputs for --audio-device
+cargo run --bin cdjd -- net-down            # remove the virtual network
+```
+
+`run-fleet --library` puts the export in player 1's USB slot and loads its
+first tracks onto the players (2-4 over LINK). `feth-plan` prints the network
+commands instead of running them.
+
+## The virtual network
+
+Client apps need each virtual device at its own IP address, on a network
+interface they can listen on. The app creates a macOS `feth` pair, a virtual
+Ethernet cable:
+
+| Interface | Addresses | Who |
+| --- | --- | --- |
+| `feth0` | `10.77.77.1`-`.4` (players), `.33` (mixer) | the emulator |
+| `feth1` | `10.77.77.200` | ShowKontrol, Beat Link Trigger |
+
+Details that matter (all handled by the setup):
+
+- The subnet's route belongs to `feth1` so client apps can reach the devices;
+  an extra route scoped to `feth0` lets the emulator reach the client apps.
+- Discovery packets (claims, keep-alives) are broadcast. Status, beats,
+  positions and mixer packets go straight to `10.77.77.200`: macOS hands a
+  sender a local copy of every broadcast on a virtual interface, so a client
+  on the same Mac would otherwise receive everything twice.
+- The emulator never binds UDP 50000-50002, so Beat Link Trigger or
+  ShowKontrol can run on the same Mac. Beat Link Trigger warns that `feth0`
+  sees the same network; that is expected and harmless.
+
+## Repo layout
+
+```text
+app/                      Rust workspace
+  crates/
+    cdj-proto/            Pro DJ Link packet codecs (no I/O)
+    cdj-core/             Rig, decks, audio engine, mixer, media, dbserver, network
+    cdjd/                 Command line
+  vendor/rekordcrate/     rekordcrate 0.3.0 with some fields made public
+  tools/
+    beatlink-probe/       Goes online with beat-link and reports what it sees
+    capture-cdj.sh        Guided capture of real gear (see below)
+ui/                       Tauri app: Svelte UI (src/) and Rust shell (src-tauri/)
+discovery.md              Firmware / protocol / architecture notes
+```
+
+## Testing
+
+```sh
+cd app && cargo test --workspace
+```
+
+Packet layouts are checked byte for byte against beat-link's own templates;
+with Beat Link Trigger installed (or `BEATLINK_JAR` set) the tests also parse
+the emulator's packets and dbserver replies with beat-link itself, using the
+real rekordbox demo export in `vendor/rekordcrate/data`.
+
+On a live setup, with Beat Link Trigger closed:
+
+```sh
+java -cp "/Applications/Beat Link Trigger.app/Contents/app/beat-link-trigger.jar" \
+    app/tools/beatlink-probe/Probe.java 15
+```
+
+**Captures of real gear** (CDJs, DJM and this Mac on one switch):
+`app/tools/capture-cdj.sh <interface>` walks through power-on, loading,
+mixing, master/sync and deck controls, one file per step, into `captures/`
+(git-ignored: recordings contain your devices' MAC addresses).
+
+## Known limits
+
+- Client apps can't send commands to the virtual decks yet (become master,
+  sync, load track, media queries): the emulator doesn't listen on UDP
+  50000-50002 so those apps can bind them.
+- No NFS file sharing; clients use the dbserver. Whether ShowKontrol needs
+  NFS is not known yet.
+- Model differences beyond those listed above (per-model menus, the DJM-V10's
+  4-band EQ, older players' track-data limits) aren't emulated; several
+  per-model details are educated guesses until checked against real units.
+- macOS only.
 
 ## Why not run the real firmware?
 
@@ -33,138 +180,12 @@ has the detail; short version:
 So this project is a **clean-room reimplementation of the Pro DJ Link
 protocol** based on the public analysis by the Deep-Symmetry project
 (dysentery, beat-link, crate-digger). No Pioneer / AlphaTheta source code is
-read, linked, or redistributed.
-
-## Repo layout
-
-```text
-app/                      Rust workspace (the emulator)
-  crates/
-    cdj-proto/            Pro DJ Link packet codec (no I/O)
-    cdj-core/             Device orchestration, networking, timing, library reader
-    cdjd/                 Development CLI
-  vendor/
-    rekordcrate/          Vendored rekordcrate 0.3.0 (fields made pub for PDB/ANLZ access)
-prompt.md                 Original brief + clarifying Q&A
-discovery.md              Living firmware / protocol / architecture notes
-```
-
-## Build & run
-
-Requires Rust 1.75+ (tested on 1.91).
-
-```sh
-cd app
-cargo test                 # run codec unit tests
-cargo build                # build the CLI
-
-# List network interfaces the emulator can bind on:
-./target/debug/cdjd ifaces
-
-# Full fleet: 4 CDJ-3000s + 1 DJM-V10 with synthetic metadata/waveforms.
-./target/debug/cdjd run-fleet --iface feth0
-
-# Same, but all 4 CDJs broadcast beat packets at 128 BPM immediately
-# (no audio; timecode-only mode for ShowKontrol dev):
-./target/debug/cdjd run-fleet --iface feth0 --bpm 128 --autoplay
-
-# Load audio files into players 1 and 2, beats phase-locked to the playhead.
-# --beat-offset-ms places beat 1 of bar 1 at the real downbeat of the track.
-cargo build --release
-./target/release/cdjd run-fleet --iface feth0 --bpm 128 --beat-offset-ms 100 \
-    --track ~/Music/track1.wav \
-    --track ~/Music/track2.flac
-
-# Load a Rekordbox USB export: real waveforms, beat grids, and metadata from
-# ANLZ/PDB files. Tracks assigned in PDB order to players 1..N.
-# Export your library from rekordbox to a folder, then point --library at it.
-./target/release/cdjd run-fleet --iface feth0 \
-    --library /Volumes/MY_USB
-
-# Single virtual CDJ (minimal mode; mostly for debugging):
-./target/debug/cdjd run --iface feth0 --device-number 1 --model CDJ-3000
-```
-
-Verify the broadcasts on the wire (another terminal):
-
-```sh
-sudo tcpdump -i feth0 -nn -X 'udp port 50000 or udp port 50001 or udp port 50002'
-```
-
-You should see:
-
-- 54-byte packets on :50000 every ~1.5 s per device (keep-alive, kind `0x06`).
-- Short bursts of 44/50/38-byte packets on :50000 at startup (claim stages 1/2/3).
-- 212-byte packets on :50002 every ~200 ms per CDJ (CDJ status, kind `0x0a`).
-- 56-byte packets on :50002 every ~200 ms from the DJM (kind `0x29`).
-- With `--autoplay`: 96-byte packets on :50001 at the BPM cadence per CDJ (beat, kind `0x28`).
-
-All packets start with the `Qspt1WmJOL` magic
-(`51 73 70 74 31 57 6d 4a 4f 4c`).
-
-### Isolating the emulator with `feth` (recommended when also running ShowKontrol on this Mac)
-
-`lo0` doesn't carry UDP broadcasts, so ShowKontrol can't see the emulator's
-devices on loopback. Use a macOS `feth` virtual ethernet pair instead:
-
-```sh
-./target/debug/cdjd feth-plan                 # prints the sudo commands
-./target/debug/cdjd feth-plan --teardown      # also prints teardown
-```
-
-Run the emitted commands, then point `cdjd run-fleet --iface feth0` and
-ShowKontrol at the same feth interface.
-
-## What Beat Link Trigger / ShowKontrol sees
-
-When a dbserver client (BLT, ShowKontrol) queries a virtual deck:
-
-| Feature | Without `--library` | With `--library` |
-| ------- | ------------------- | --------------- |
-| Title / Artist / Album / Genre / BPM | Synthetic ("Virtual Track 1") | Real PDB values |
-| Waveform preview | Synthetic beat-pattern (blue bars) | Real ANLZ waveform |
-| Beat grid | Synthesised from BPM | Real ANLZ beat grid |
-| Album art | Placeholder (dark "CDJ EMUL" JPEG) | Placeholder (real art extraction pending) |
-
-## Rekordbox USB export format
-
-rekordbox writes exports in this layout:
-
-```text
-<root>/
-  PIONEER/
-    rekordbox.pdb               track/artist/album/genre database
-    USBANLZ/<path>/ANLZ0000.DAT per-track analysis (beat grid, waveform preview)
-    USBANLZ/<path>/ANLZ0000.EXT per-track extended analysis (colour waveform, cues)
-```
-
-The emulator reads `rekordbox.pdb` at startup (via the vendored `rekordcrate`
-crate) and maps each track's `analyze_path` to its `.DAT` file on demand.
-
-## Roadmap
-
-Full milestone breakdown in [discovery.md §8](discovery.md). Summary:
-
-- **M0** - Pro DJ Link packet codec + single-CDJ announce loop. **Done.**
-- **M1** - 4 players + 1 mixer fleet; claim dance; idle CDJ/DJM status; `feth` helper. **Done.**
-- **M2.1** - Beat packets on :50001, phase-locked `BeatClock`, `PlayerState` actor. **Done.**
-- **M2.2** - Audio decode (Symphonia) + CPAL playback per player, shared playhead. **Done.**
-- **M2.3** - Phase-locked `BeatClock` + `--beat-offset-ms`. **Done.**
-- **M3.1** - dbserver (TCP 1051 + UDP 12523): metadata, waveform preview, beat grid, album art. **Done.**
-- **M3.2** - Rekordbox USB export reader (`--library`): real PDB metadata + ANLZ waveforms/beat grids. **Done.**
-- **M3.3** - Real album art from ANLZ `.EXT` files.
-- **M3.4** - Full-detail colour waveform (EXT `WaveformColorPreview` / `WaveformDetail`).
-- **M4** - Virtual DJM mix bus (sum players to a single output); crossfader / EQ / on-air flags.
-- **M5** - Automatic beat-grid extraction (aubio) so `--beat-offset-ms` comes for free.
-- **M6** - **ShowKontrol validation:** the real deliverable.
-- **M7** - Tauri + Svelte desktop UI (deck view, mixer view, library browser).
-- **M8** - Other CDJ models (2000 / 2000NXS / 2000NXS2).
-- **M9** - Windows port.
-- **M10** - MIDI control surface mapping.
+read, linked, or redistributed. The UI uses its own icons and artwork.
 
 ## License
 
-Source code: MIT OR Apache-2.0 (see per-crate `Cargo.toml`).
+Source code: MIT OR Apache-2.0 (see per-crate `Cargo.toml`). The vendored
+rekordcrate is MPL-2.0; the Signalsmith Stretch time-stretcher is MIT.
 
 The AlphaTheta firmware and source-code drops referenced in `discovery.md`
 are **not** part of this repository; they belong to AlphaTheta Corporation

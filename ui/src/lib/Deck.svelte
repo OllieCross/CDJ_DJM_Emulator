@@ -13,22 +13,35 @@
     type SourceView,
     type TempoRange,
   } from "./types";
+  import { DEFAULT_PLAYER_MODEL, rememberModel, rememberedModel, type ModelInfo } from "./models";
   import { capture } from "./pointer";
   import { livePosition, loadVisuals, trackKey, type TrackVisuals } from "./visuals";
 
   let {
     player,
+    models,
     sources,
     networkReady,
     run,
   }: {
     player: PlayerView;
+    models: ModelInfo[];
     sources: SourceView[];
     networkReady: boolean;
     run: (command: string, args?: Record<string, unknown>) => Promise<void>;
   } = $props();
 
   const n = $derived(player.number);
+
+  // Model to power on as (the one chosen last time for this deck).
+  // svelte-ignore state_referenced_locally
+  let chosenModel = $state(rememberedModel(`player${player.number}`, DEFAULT_PLAYER_MODEL));
+  const chosenInfo = $derived(models.find((m) => m.id === chosenModel));
+
+  function powerOn() {
+    rememberModel(`player${n}`, chosenModel);
+    run("spawn_player", { player: n, model: chosenModel });
+  }
   const track = $derived(player.loaded?.track ?? null);
   const length = $derived(player.length_ms ?? (track ? track.duration_s * 1000 : 0));
   const linked = $derived(player.loaded && player.loaded.source_player !== n);
@@ -135,6 +148,7 @@
   <div class="screen">
     <div class="hdr">
       <span class="num">{n}</span>
+      {#if player.running && player.model_name}<span class="model">{player.model_name}</span>{/if}
       {#if player.loaded}
         <span class="src" class:link={linked} title="Track source">
           <Icon name={linked ? "link" : player.loaded.source_slot === "Usb" ? "usb" : "sd"} size={12} />
@@ -153,7 +167,7 @@
         class:on={player.running}
         disabled={!player.running && !networkReady}
         title={player.running ? "Power off" : "Power on"}
-        onclick={() => run(player.running ? "despawn_player" : "spawn_player", { player: n })}
+        onclick={() => (player.running ? run("despawn_player", { player: n }) : powerOn())}
       >
         <Icon name="power" size={13} />
       </button>
@@ -215,10 +229,18 @@
         </div>
       </div>
     {:else}
-      <button class="power-big" disabled={!networkReady} onclick={() => run("spawn_player", { player: n })}>
-        <Icon name="power" size={34} />
-        <span>{networkReady ? `Power on player ${n}` : "Set up the network first"}</span>
-      </button>
+      <div class="off">
+        <select bind:value={chosenModel} aria-label="Player {n} model">
+          {#each models as m (m.id)}
+            <option value={m.id}>{m.name}</option>
+          {/each}
+        </select>
+        <button class="power-big" disabled={!networkReady} onclick={powerOn}>
+          <Icon name="power" size={34} />
+          <span>{networkReady ? `Power on as ${chosenInfo?.name ?? "player"}` : "Set up the network first"}</span>
+        </button>
+        {#if chosenInfo?.notes}<span class="note">{chosenInfo.notes}</span>{/if}
+      </div>
     {/if}
   </div>
 
@@ -227,8 +249,8 @@
   {#if player.running}
     <div class="surface">
       <div class="left">
-        <div class="pads">
-          {#each HOT_CUE_NAMES as name, i}
+        <div class="pads" style="--pads: {player.hot_cue_slots}">
+          {#each HOT_CUE_NAMES.slice(0, player.hot_cue_slots) as name, i}
             <button
               class="pad"
               class:set={player.hot_cues[i]}
@@ -530,6 +552,42 @@
     height: 30px;
   }
 
+  .model {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #c8c8d0;
+  }
+
+  .off {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .off select {
+    background: #15151a;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font: inherit;
+    padding: 4px 6px;
+  }
+
+  .off .power-big {
+    flex: none;
+  }
+
+  .note {
+    max-width: 80%;
+    font-size: 10px;
+    color: #6a6a74;
+    text-align: center;
+  }
+
   .no-track,
   .power-big {
     flex: 1;
@@ -621,7 +679,7 @@
 
   .pads {
     display: grid;
-    grid-template-columns: repeat(8, 1fr);
+    grid-template-columns: repeat(var(--pads, 8), 1fr);
     gap: 3px;
   }
 

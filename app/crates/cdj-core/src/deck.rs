@@ -142,6 +142,8 @@ struct DeckInner {
 /// One player's transport and the flags it reports.
 pub struct Deck {
     pub number: u8,
+    /// Hot cues this player model has (3 on older players, else 8).
+    pub hot_cue_slots: usize,
     engine: Arc<AudioEngine>,
     feedback: Arc<VoiceFeedback>,
     inner: Mutex<DeckInner>,
@@ -151,11 +153,13 @@ pub struct Deck {
 }
 
 impl Deck {
-    /// Player `number` (1-based), playing through voice `number - 1`.
-    pub fn new(number: u8, engine: Arc<AudioEngine>, idle_bpm_hundredths: u16) -> Self {
+    /// Player `number` (1-based), playing through voice `number - 1`, with
+    /// `hot_cue_slots` hot cues (at most [`HOT_CUES`]).
+    pub fn new(number: u8, engine: Arc<AudioEngine>, idle_bpm_hundredths: u16, hot_cue_slots: usize) -> Self {
         let voice = usize::from(number - 1);
         let deck = Self {
             number,
+            hot_cue_slots: hot_cue_slots.min(HOT_CUES),
             feedback: engine.feedback(voice),
             engine,
             inner: Mutex::new(DeckInner {
@@ -245,7 +249,8 @@ impl Deck {
             let start = f64::from(c.time_ms);
             match c.hot_cue as usize {
                 0 => memory_cues.push(start),
-                n @ 1..=HOT_CUES => {
+                // Hot cues past what this model has are ignored, as on the player.
+                n @ 1..=HOT_CUES if n <= self.hot_cue_slots => {
                     hot_cues[n - 1] = Some(HotCue {
                         start_ms: start,
                         loop_end_ms: c.loop_end_ms.map(f64::from),
@@ -422,7 +427,7 @@ impl Deck {
     /// Hot cue `n` (0-based) pressed: jump to it and play (a loop hot cue
     /// starts its loop); an empty one stores the current position.
     pub fn hot_cue(&self, n: usize) {
-        if n >= HOT_CUES {
+        if n >= self.hot_cue_slots {
             return;
         }
         let pos = self.position_ms();
@@ -735,7 +740,7 @@ pub(crate) mod tests {
     fn deck_with_track(cues: &[Cue]) -> (Arc<AudioEngine>, Deck) {
         let engine = Arc::new(AudioEngine::new());
         engine.start_silent().unwrap();
-        let deck = Deck::new(1, engine.clone(), 12000);
+        let deck = Deck::new(1, engine.clone(), 12000, HOT_CUES);
         deck.load(test_track(), None, BeatGrid::constant(12000, 0.0), cues, Some(60_000.0));
         settle();
         (engine, deck)
@@ -759,7 +764,7 @@ pub(crate) mod tests {
     #[test]
     fn empty_deck_reports_no_track_and_idle_tempo() {
         let engine = Arc::new(AudioEngine::new());
-        let deck = Deck::new(2, engine, 12800);
+        let deck = Deck::new(2, engine, 12800, HOT_CUES);
         let v = deck.view();
         assert_eq!(v.play_state, PlayState1::NoTrack);
         assert_eq!(v.track_bpm_hundredths, 12800);
@@ -807,6 +812,18 @@ pub(crate) mod tests {
         deck.cue_release();
         settle();
         assert_eq!(deck.view().play_state, PlayState1::Cued);
+    }
+
+    #[test]
+    fn older_models_only_have_three_hot_cues() {
+        let engine = Arc::new(AudioEngine::new());
+        let deck = Deck::new(1, engine, 12000, 3);
+        deck.load(test_track(), None, BeatGrid::constant(12000, 0.0), &[cue(2, 1000, None), cue(5, 2000, None)], None);
+        let v = deck.view();
+        assert!(v.hot_cues[1].is_some(), "B is kept");
+        assert!(v.hot_cues[4].is_none(), "E is beyond a 3-cue player");
+        deck.hot_cue(4);
+        assert!(deck.view().hot_cues[4].is_none(), "pad E doesn't exist");
     }
 
     #[test]

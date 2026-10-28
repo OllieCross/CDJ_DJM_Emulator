@@ -6,9 +6,11 @@
   import Deck from "./lib/Deck.svelte";
   import Mixer from "./lib/Mixer.svelte";
   import Network from "./lib/Network.svelte";
+  import type { ModelsView } from "./lib/models";
   import type { RigSnapshot } from "./lib/types";
 
   let snapshot = $state<RigSnapshot | null>(null);
+  let models = $state<ModelsView>({ players: [], mixers: [] });
   let error = $state<string | null>(null);
   let busy = $state(false);
 
@@ -28,6 +30,7 @@
 
   onMount(() => {
     invoke<RigSnapshot>("rig_snapshot").then((s) => (snapshot = s));
+    invoke<ModelsView>("models").then((m) => (models = m));
     const unlisten = listen<RigSnapshot>("rig-snapshot", (e) => (snapshot = e.payload));
     return () => {
       unlisten.then((f) => f());
@@ -54,11 +57,18 @@
     <div class="layout">
       <section class="decks">
         {#each snapshot.players as player (player.number)}
-          <Deck {player} sources={snapshot.sources} networkReady={snapshot.network.ready} {run} />
+          <Deck {player} models={models.players} sources={snapshot.sources} networkReady={snapshot.network.ready} {run} />
         {/each}
       </section>
       <aside>
-        <Mixer mixer={snapshot.mixer} players={snapshot.players} audio={snapshot.audio} networkReady={snapshot.network.ready} {run} />
+        <Mixer
+          mixer={snapshot.mixer}
+          models={models.mixers}
+          players={snapshot.players}
+          audio={snapshot.audio}
+          networkReady={snapshot.network.ready}
+          {run}
+        />
         <Browser players={snapshot.players} {run} />
       </aside>
     </div>

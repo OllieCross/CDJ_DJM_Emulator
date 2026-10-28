@@ -15,17 +15,27 @@
 #
 # Close the CDJ emulator (and anything else on ports 50000-50002) first.
 #
-# Usage: sudo app/tools/capture-cdj.sh <interface, e.g. en7> [output folder]
+# Records with Wireshark's dumpcap when Wireshark is installed (no sudo
+# needed, files open straight in Wireshark), else with tcpdump (needs sudo).
+#
+# Usage: app/tools/capture-cdj.sh <interface, e.g. en7> [output folder]
 set -eu
 
-IFACE=${1:?usage: sudo $0 <interface, e.g. en7> [output folder]}
+IFACE=${1:?usage: $0 <interface, e.g. en7> [output folder]}
 OUT=${2:-captures/$(date +%Y%m%d-%H%M)}
-mkdir -p "$OUT"
+DUMPCAP=/Applications/Wireshark.app/Contents/MacOS/dumpcap
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Run with sudo (tcpdump needs it)." >&2
+if [ -x "$DUMPCAP" ]; then
+  EXT=pcapng
+  record() { "$DUMPCAP" -q -i "$IFACE" -w "$1"; }
+elif [ "$(id -u)" -eq 0 ]; then
+  EXT=pcap
+  record() { tcpdump -i "$IFACE" -s 0 -U -w "$1"; }
+else
+  echo "Install Wireshark, or run with sudo to record with tcpdump." >&2
   exit 1
 fi
+mkdir -p "$OUT"
 
 {
   echo "date: $(date)"
@@ -48,54 +58,63 @@ scenario() {
   printf "Enter = start recording, s = skip: "
   read -r answer
   [ "$answer" = "s" ] && return 0
-  tcpdump -i "$IFACE" -s 0 -U -w "$OUT/$name.pcap" 2>/dev/null &
+  record "$OUT/$name.$EXT" 2>/dev/null &
   pid=$!
   sleep 1
   printf "Recording. Do the steps, then press Enter to stop: "
   read -r _
   kill -INT "$pid"
   wait "$pid" 2>/dev/null || true
-  echo "saved $OUT/$name.pcap"
+  echo "saved $OUT/$name.$EXT"
 }
 
 scenario 01_power_on \
-"Beat Link Trigger and ShowKontrol closed. Switch everything off, start
-recording, switch the mixer on, then each player. Wait until all screens
-are up, then 20 s more."
+"BLT and ShowKontrol closed, all gear off, USB not inserted.
+After Enter: DJM on, wait 10 s; player 1 on, wait 10 s; player 2 on.
+Wait until both players show their home screen, then 30 s more."
 
 scenario 02_blt_online \
-"Open Beat Link Trigger, pick interface $IFACE, go online. Wait 20 s."
+"Open Beat Link Trigger, choose $IFACE, go online. Open Network >
+Show Player Status. Wait 30 s without touching the gear."
 
 scenario 03_load_local \
-"Insert a rekordbox USB into player 1. On player 1, load a track that has
-hot cues, memory cues, a loop and artwork. Wait until BLT shows its title,
-waveforms, artwork and cues (about 15 s)."
+"Insert the USB into player 1, wait 5 s. On player 1 load track A (has hot
+cues, memory cues, a saved loop, artwork). Wait until BLT's player status
+shows title, artwork and waveform, then 15 s more. Don't press PLAY."
 
 scenario 04_load_link \
-"On player 2, browse player 1's USB over LINK and load a different track.
-Wait until BLT shows it (about 15 s). Skip with s if you have one player."
+"On player 2 open SOURCE, pick player 1's USB, load track B (different
+BPM). Wait until BLT shows it, then 15 s more. Don't press PLAY."
 
 scenario 05_play_mix \
-"Play both players. On the mixer: channel 2 fader down and up, crossfader
-fully to one side and back to the middle (with channels assigned A/B),
-then a channel EQ low kill and back. Note roughly when you did what."
+"5 s between actions. Mixer: ch1+ch2 faders up, crossfader centre, ch1
+assign A, ch2 assign B. PLAY player 1, PLAY player 2, wait 10 s.
+Ch2 fader down, wait 5 s, up. Crossfader fully A, 5 s, fully B, 5 s,
+centre. Ch1 LOW EQ fully down, 5 s, back to centre. Ch2 TRIM down, back."
 
 scenario 06_master_sync \
-"Both playing. Press MASTER on player 2, wait 5 s, then SYNC on player 1
-and move player 2's tempo fader a little. Then MASTER back on player 1."
+"Both still playing, 5 s between actions. MASTER on player 2, wait 10 s.
+SYNC on player 1, wait 10 s. Player 2 tempo fader to about +4%, wait
+10 s, back to 0. SYNC off on player 1. MASTER on player 1, wait 10 s."
 
 scenario 07_transport \
-"On player 1: PAUSE, CUE, PLAY, hot cue A, a 4-beat loop for two turns then
-EXIT, tempo fader to about +3% and back, MASTER TEMPO on then off, REVERSE
-on and off, play into a memory cue."
+"Player 1 only, 5 s between actions. Pause player 2 first.
+PAUSE, CUE, PLAY 5 s, hot cue A, hot cue B, saved loop (RELOOP or its
+hot cue) two turns then EXIT, 4-beat AUTO LOOP two turns then EXIT, tempo
+range 6% > 10% > 16% > WIDE > back, tempo fader +3% then back, MASTER
+TEMPO on then off, REVERSE on 5 s then off, CALL next memory cue, touch
+the jog top while playing for 2 s, needle-search to the last 20 s and let
+the track end, wait 10 s."
 
 scenario 08_eject \
-"Stop both players, eject the USB from player 1 (hold its USB stop button
-until it says safe), wait 10 s. Note what player 2 does."
+"Player 2: load another track from player 1's USB over LINK, PLAY it.
+Then press STOP-USB on player 1 until it says it's safe, pull the USB,
+wait 15 s and note what player 2 shows."
 
 scenario 09_showkontrol \
-"Only if ShowKontrol is installed (else s): quit BLT, open ShowKontrol,
-connect it to the gear, re-insert the USB, load a track, play 20 s."
+"Only if ShowKontrol is installed (else s): quit BLT, re-insert the USB,
+open ShowKontrol and connect it, load track A on player 1, PLAY 30 s,
+PAUSE, CUE."
 
 echo
 echo "Done. Captures are in $OUT. Tell Claude that folder's path."

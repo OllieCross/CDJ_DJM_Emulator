@@ -103,6 +103,11 @@ export interface PlayerView {
   active_loop: LoopRegion | null;
   loaded: LoadedView | null;
   media: SlotView[];
+  /// Model id while on, e.g. "Cdj3000".
+  model: string | null;
+  model_name: string | null;
+  /// Hot cues this model has (3 or 8).
+  hot_cue_slots: number;
 }
 
 export interface MixerControls {
@@ -121,7 +126,9 @@ export interface AudioView {
 
 export interface MixerView {
   running: boolean;
-  model: string;
+  /// Model id while on, e.g. "DjmA9".
+  model: string | null;
+  model_name: string | null;
   channels: number;
   controls: MixerControls;
 }

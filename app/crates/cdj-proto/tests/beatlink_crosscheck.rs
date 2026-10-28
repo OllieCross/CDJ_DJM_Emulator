@@ -251,3 +251,41 @@ fn beatlink_parses_our_cdj_status_and_position_packets() {
     assert_eq!(field("3.bpm"), "12800");
     assert_eq!(field("3.effectiveTempo"), "128.0");
 }
+
+/// Older players send shorter status packets (pre-nexus 0xd0, nexus 0xd4,
+/// nexus 2 0x11c); beat-link reads them without complaint.
+#[test]
+fn beatlink_parses_older_players_status() {
+    let Some(jar) = crosscheck_jar() else { return };
+    let packets: Vec<(String, Vec<u8>)> = [("CDJ-2000", 0xd0), ("CDJ-2000nexus", 0xd4), ("CDJ-2000NXS2", 0x11c)]
+        .into_iter()
+        .map(|(name, len)| {
+            let s = CdjStatus {
+                track_source_player: 1,
+                track_source_slot: TrackSourceSlot::Usb,
+                track_type: TrackType::Rekordbox,
+                rekordbox_id: 7,
+                play_state1: PlayState1::Playing,
+                moving: true,
+                play_state3: PlayState3::ForwardCdj,
+                playing: true,
+                bpm_hundredths: Some(12400),
+                beat_number: Some(33),
+                beat_within_bar: 1,
+                ..CdjStatus::idle(DeviceName::new(name).unwrap(), 1)
+            };
+            (name.to_string(), s.encode_len(len))
+        })
+        .collect();
+    let args: Vec<(&str, &[u8])> = packets.iter().map(|(_, b)| ("cdj", b.as_slice())).collect();
+    let seen = parse_with_beatlink(&jar, &args);
+    let field = |k: &str| seen.get(k).map(String::as_str).unwrap_or("<missing>");
+    for (i, (name, _)) in packets.iter().enumerate() {
+        assert_eq!(field(&format!("{i}.name")), name);
+        assert_eq!(field(&format!("{i}.rekordboxId")), "7", "{name}");
+        assert_eq!(field(&format!("{i}.playing")), "true", "{name}");
+        assert_eq!(field(&format!("{i}.bpm")), "12400", "{name}");
+        assert_eq!(field(&format!("{i}.beatNumber")), "33", "{name}");
+        assert_eq!(field(&format!("{i}.canReportLooping")), "false", "{name}");
+    }
+}

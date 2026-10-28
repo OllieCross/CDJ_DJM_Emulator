@@ -74,10 +74,6 @@ impl DeviceLink {
         })
     }
 
-    pub fn peer_count(&self) -> usize {
-        self.topology.peers.len()
-    }
-
     fn socket(&self, port: Port) -> &UdpSocket {
         match port {
             Port::Announce => &self.announce,
