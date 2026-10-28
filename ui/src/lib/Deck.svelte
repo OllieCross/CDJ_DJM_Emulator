@@ -549,7 +549,7 @@
   }
 
   .overview {
-    height: 30px;
+    height: 40px;
   }
 
   .model {

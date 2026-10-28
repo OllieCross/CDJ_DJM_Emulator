@@ -45,6 +45,10 @@ const CONTENTS: MediaContents = {
     { id: 10, parent_id: 0, name: "Show Opener", is_folder: false, track_ids: [3, 1, 5] },
     { id: 11, parent_id: 0, name: "Peak Time", is_folder: true, track_ids: [] },
     { id: 12, parent_id: 11, name: "Bangers", is_folder: false, track_ids: [2, 6, 4] },
+    { id: 13, parent_id: 0, name: "Warm-up", is_folder: false, track_ids: [3, 5] },
+    { id: 14, parent_id: 0, name: "Timecode cues", is_folder: false, track_ids: [1, 2, 4, 6] },
+    { id: 15, parent_id: 0, name: "Lasers + Pyro", is_folder: false, track_ids: [6, 4] },
+    { id: 16, parent_id: 0, name: "Closing", is_folder: false, track_ids: [4] },
   ],
 };
 
@@ -163,15 +167,17 @@ function power(n: number, on: boolean, modelId = "Cdj3000") {
   });
 }
 
-// Demo rig: players 1-3 on, 1 and 2 loaded, 1 playing as master.
+// Demo rig: players 1-3 on and loaded, 1 (master) and 3 playing, 4 off.
 power(1, true, "Cdj3000X");
 power(2, true, "Cdj3000X");
 power(3, true, "Cdj2000Nxs");
 player(1).media = [{ slot: "Usb", name: "DEMO_USB", root: "/Volumes/DEMO_USB" }];
 load(1, 1, 1, "Usb");
 load(2, 2, 1, "Usb");
-Object.assign(player(1), { playing: true, play_state: "Playing", master: true, pitch_fader: 0.2 });
+load(3, 3, 1, "Usb");
+Object.assign(player(1), { playing: true, play_state: "Playing", master: true, pitch_fader: 0.2, position_ms: 96_000 });
 Object.assign(player(2), { synced: true });
+Object.assign(player(3), { playing: true, play_state: "Playing", position_ms: 182_000 });
 
 function tick(dtMs: number) {
   const mixer = state.mixer;
@@ -202,32 +208,57 @@ function tick(dtMs: number) {
   }
 }
 
-/// Synthetic waveforms: `[height, r, g, b]` per column, shaped like a
-/// club track (intro, breakdown, drops), with kicks on every beat.
-function waveforms(t: TrackSummary): ArrayBuffer {
+/// Repeatable pseudo-random 0..1 for integer `n`.
+function noise(n: number): number {
+  const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/// Band energies (low, mid, high; 0..1) at `ms` of a club track: intro and
+/// outro with kick and hats, a breakdown without kick, full drops.
+function bands(t: TrackSummary, ms: number): [number, number, number] {
   const beatMs = 60_000 / t.bpm;
+  const f = ms / (t.duration_s * 1000);
+  const beat = ms / beatMs;
+  const phase = beat - Math.floor(beat);
+  const bar = Math.floor(beat / 4);
+  const section = f < 0.1 ? "intro" : f < 0.2 ? "build" : f < 0.45 ? "drop" : f < 0.55 ? "break" : f < 0.85 ? "drop" : "outro";
+  const kick = section === "break" ? 0 : Math.exp(-phase * 6);
+  const bass = section === "drop" ? 0.55 * (1 - Math.exp(-phase * 3)) : 0;
+  const hats = section === "intro" ? 0.25 : 0.35 + 0.45 * Math.exp(-Math.abs(phase - 0.5) * 12);
+  const pad = section === "break" ? 0.55 + 0.25 * Math.sin(beat / 3) : section === "drop" ? 0.45 : section === "build" ? 0.2 + 0.5 * ((f - 0.1) / 0.1) : 0.15;
+  const jitter = 0.85 + 0.3 * noise(Math.floor(ms / 7) + bar);
+  return [
+    Math.min(1, (0.95 * kick + bass) * jitter),
+    Math.min(1, pad * jitter),
+    Math.min(1, hats * (0.8 + 0.4 * noise(Math.floor(ms / 3)))),
+  ];
+}
+
+/// `[height, r, g, b]` for band energies, coloured the way rekordbox's RGB
+/// waveform is (lows red, mids green, highs blue).
+function column([low, mid, high]: [number, number, number], out: number[]) {
+  const top = Math.max(low, mid, high, 0.01);
+  out.push(255 * top, (255 * low) / top, (200 * mid) / top, (255 * high) / top);
+}
+
+/// Synthetic waveforms in the layout `track_waveforms` returns.
+function waveforms(t: TrackSummary): ArrayBuffer {
   const lengthMs = t.duration_s * 1000;
-  const energy = (ms: number) => {
-    const f = ms / lengthMs;
-    if (f < 0.12 || f > 0.92) return 0.45;
-    if (f > 0.45 && f < 0.55) return 0.3;
-    return 0.9;
-  };
-  const column = (ms: number, out: number[]) => {
-    const phase = (ms % beatMs) / beatMs;
-    const kick = Math.exp(-phase * 7);
-    const e = energy(ms);
-    const h = Math.min(255, 255 * e * (0.45 + 0.55 * kick) * (0.9 + 0.1 * Math.sin(ms / 37)));
-    out.push(h, 40 + 200 * kick * e, 90 + 60 * (1 - kick), 255 - 120 * kick);
-  };
   const overview: number[] = [];
   for (let i = 0; i < 400; i++) {
-    const ms = (i / 400) * lengthMs;
-    const e = energy(ms);
-    overview.push(255 * e, 60 + 140 * e, 120, 255 - 100 * e);
+    // Average a few points per column so kicks don't alias.
+    const sum: [number, number, number] = [0, 0, 0];
+    for (let k = 0; k < 8; k++) {
+      const b = bands(t, ((i + k / 8) / 400) * lengthMs);
+      sum[0] += b[0] / 8;
+      sum[1] += b[1] / 8;
+      sum[2] += b[2] / 8;
+    }
+    column(sum, overview);
   }
   const detail: number[] = [];
-  for (let i = 0; i < t.duration_s * 150; i++) column((i / 150) * 1000, detail);
+  for (let i = 0; i < t.duration_s * 150; i++) column(bands(t, (i / 150) * 1000), detail);
   const buf = new ArrayBuffer(8 + overview.length + detail.length);
   const view = new DataView(buf);
   view.setUint32(0, overview.length / 4, true);
