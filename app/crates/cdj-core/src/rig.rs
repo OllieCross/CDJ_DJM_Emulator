@@ -148,9 +148,12 @@ impl RigShared {
         self.players.read().unwrap().values().find(|d| d.master()).cloned()
     }
 
+    /// Channels the mixer reports on air: open, with a player switched on
+    /// behind them (an empty channel has nothing to put on air).
     pub(crate) fn channels_on_air(&self, channels: u8) -> Vec<bool> {
-        let mixer = self.mixer.lock().unwrap();
-        (1..=channels).map(|ch| mixer.on_air(ch)).collect()
+        let mixer = self.mixer.lock().unwrap().clone();
+        let players = self.players.read().unwrap();
+        (1..=channels).map(|ch| mixer.on_air(ch) && players.contains_key(&ch)).collect()
     }
 
     /// Synced players play at the tempo master's BPM, whether the master is
@@ -993,6 +996,11 @@ pub(crate) mod tests {
 
         r.spawn_mixer(MixerModel::DjmV10).await.unwrap();
         assert!(p1.on_air() && !p2.on_air());
+        assert_eq!(
+            r.shared.channels_on_air(4),
+            [true, false, false, false],
+            "channels without a player aren't on air"
+        );
         assert_eq!(r.shared.engine.gains().channels[1].level.get(), 0.0);
 
         r.set_eq(1, 0, crate::mixer::EQ_KILL_DB).unwrap();

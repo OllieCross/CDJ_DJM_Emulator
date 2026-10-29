@@ -124,6 +124,11 @@ pub struct VoiceFeedback {
     position_ms: AtomicU64,
     stamp_ns: AtomicU64,
     speed: AtomicU64,
+    /// Speed the playhead is heard moving at towards `position_ms` until
+    /// `stamp_ns` (0 after a jump or from a standstill), and where that
+    /// movement began.
+    approach: AtomicU64,
+    approach_from_ms: AtomicU64,
     playing: AtomicBool,
     ended: AtomicBool,
 }
@@ -135,32 +140,47 @@ impl VoiceFeedback {
             position_ms: AtomicU64::new(0f64.to_bits()),
             stamp_ns: AtomicU64::new(0),
             speed: AtomicU64::new(1f64.to_bits()),
+            approach: AtomicU64::new(0f64.to_bits()),
+            approach_from_ms: AtomicU64::new(0f64.to_bits()),
             playing: AtomicBool::new(false),
             ended: AtomicBool::new(false),
         }
     }
 
-    fn publish(&self, position_ms: f64, audible_at: Instant, speed: f64, playing: bool, ended: bool) {
+    fn publish(&self, position_ms: f64, audible_at: Instant, speed: f64, approach: (f64, f64), playing: bool, ended: bool) {
         let stamp = audible_at.saturating_duration_since(self.epoch).as_nanos() as u64;
         self.position_ms.store(position_ms.to_bits(), Ordering::Relaxed);
         self.speed.store(speed.to_bits(), Ordering::Relaxed);
+        self.approach.store(approach.0.to_bits(), Ordering::Relaxed);
+        self.approach_from_ms.store(approach.1.to_bits(), Ordering::Relaxed);
         self.playing.store(playing, Ordering::Relaxed);
         self.ended.store(ended, Ordering::Relaxed);
         self.stamp_ns.store(stamp, Ordering::Release);
     }
 
-    /// The position being heard right now, in track ms.
+    /// The position being heard right now, in track ms. The published
+    /// position is heard at its stamp, a little in the future: until then
+    /// what's heard is the audio before it, still moving towards it (so the
+    /// position runs smoothly across blocks, and glides into a pause).
     pub fn position_ms(&self) -> f64 {
         let stamp = self.stamp_ns.load(Ordering::Acquire);
         let pos = f64::from_bits(self.position_ms.load(Ordering::Relaxed));
-        if !self.playing() {
-            return pos;
-        }
         let now = Instant::now().saturating_duration_since(self.epoch).as_nanos() as f64;
-        let speed = f64::from_bits(self.speed.load(Ordering::Relaxed));
-        // Only extrapolate forwards from the stamp: before it, the published
-        // position hasn't been heard yet.
-        pos + ((now - stamp as f64) / 1e6).max(0.0) * speed
+        let since_ms = (now - stamp as f64) / 1e6;
+        if since_ms < 0.0 {
+            let approach = f64::from_bits(self.approach.load(Ordering::Relaxed));
+            let from = f64::from_bits(self.approach_from_ms.load(Ordering::Relaxed));
+            let heard = pos + since_ms * approach;
+            if approach >= 0.0 {
+                heard.max(from)
+            } else {
+                heard.min(from)
+            }
+        } else if self.playing() {
+            pos + since_ms * f64::from_bits(self.speed.load(Ordering::Relaxed))
+        } else {
+            pos
+        }
     }
 
     /// The playhead is moving.
@@ -193,15 +213,47 @@ struct Voice {
     last_beat: i64,
     next_beat_ms: f64,
     master_tempo: bool,
-    /// Time-stretcher for master tempo, and whether it ran last block.
+    /// Time-stretcher for master tempo, whether it ran last block, and at
+    /// what speed.
     stretch: Stretch,
     stretching: bool,
+    stretch_speed: f64,
     /// After a jump the stretcher holds stale audio; refill it first.
     needs_prime: bool,
     /// Fraction of an input frame carried between blocks.
     carry: f64,
     stretch_in: Vec<f32>,
+    /// The path that sounded before the stretcher started or stopped,
+    /// still playing under the new one.
+    handover: Option<Handover>,
+    handover_out: Vec<f32>,
+    /// Speed the playhead moved at through the last block without jumping
+    /// (0 if it stood still or jumped since: seek, loop), and the heard
+    /// position that movement started from.
+    motion: f64,
+    motion_from_ms: f64,
+    /// The playhead wrapped round a loop during this block.
+    wrapped: bool,
 }
+
+/// Switching between direct playback and the stretcher (master tempo on or
+/// off, or the stretcher restarting after a jump) without a gap or a jump in
+/// what's heard: the outgoing path plays on alone for `hold` frames, while a
+/// freshly started stretcher only fades in, then fades out over `fade`.
+#[derive(Debug, Clone, Copy)]
+struct Handover {
+    /// The outgoing path is the stretcher (else direct playback).
+    stretched: bool,
+    /// Where the outgoing path reads: the heard position for direct
+    /// playback, the stretcher's input position for the stretcher.
+    pos_ms: f64,
+    hold: usize,
+    fade_left: usize,
+    fade: usize,
+}
+
+/// Length of the crossfade between the two paths.
+const HANDOVER_FADE_MS: f64 = 10.0;
 
 impl Voice {
     fn new(rate: u32) -> Self {
@@ -221,9 +273,15 @@ impl Voice {
             master_tempo: false,
             stretch: Stretch::preset_default(2, rate),
             stretching: false,
+            stretch_speed: 1.0,
             needs_prime: true,
             carry: 0.0,
             stretch_in: Vec::with_capacity(32_768),
+            handover: None,
+            handover_out: Vec::with_capacity(8192),
+            motion: 0.0,
+            motion_from_ms: 0.0,
+            wrapped: false,
         };
         v.resync_beat();
         v
@@ -254,6 +312,7 @@ impl Voice {
                 self.ended = false;
                 self.loop_ms = None;
                 self.needs_prime = true;
+                self.motion = 0.0;
                 self.resync_beat();
             }
             VoiceCommand::SetPlaying(p) => {
@@ -269,10 +328,24 @@ impl Voice {
                 self.pos_ms = ms.max(0.0);
                 self.ended = false;
                 self.needs_prime = true;
+                self.motion = 0.0;
                 self.resync_beat();
             }
             VoiceCommand::SetSpeed(s) => self.speed = s,
-            VoiceCommand::SetLoop(l) => self.loop_ms = l,
+            VoiceCommand::SetLoop(l) => {
+                self.loop_ms = l;
+                // A loop that now ends behind the playhead (halved, or OUT
+                // snapped back to a beat) takes it back in, keeping its
+                // place in the loop.
+                if let Some((start, end)) = l {
+                    let len = end - start;
+                    if len > 0.0 && self.pos_ms >= end {
+                        self.pos_ms = start + (self.pos_ms - start) % len;
+                        self.motion = 0.0;
+                        self.resync_beat();
+                    }
+                }
+            }
             VoiceCommand::SetBeatSink(s) => self.beat_sink = s,
             VoiceCommand::SetMasterTempo(on) => self.master_tempo = on,
         }
@@ -285,17 +358,35 @@ impl Voice {
     }
 
     /// Delay the stretcher adds between reading audio and it being heard,
-    /// in output frames.
-    fn stretch_delay_frames(&self) -> f64 {
-        self.stretch.input_latency() as f64 / self.speed + self.stretch.output_latency() as f64
+    /// in output frames, at `speed`.
+    fn stretch_delay_frames(&self, speed: f64) -> f64 {
+        self.stretch.input_latency() as f64 / speed + self.stretch.output_latency() as f64
     }
 
-    /// The position being heard at the start of the next block.
+    /// The position being heard at the start of the next block: while the
+    /// stretcher runs, behind where it reads by its delay.
     fn heard_ms(&self, ms_per_frame: f64) -> f64 {
-        if self.stretch_active() && !self.needs_prime && self.stretching {
-            self.pos_ms - self.stretch_delay_frames() * self.speed * ms_per_frame
+        if self.stretching && !self.needs_prime {
+            let behind = self.stretch_delay_frames(self.stretch_speed) * self.stretch_speed * ms_per_frame;
+            match self.loop_ms {
+                // Read position wrapped round the loop; what's heard hasn't.
+                Some((start, end)) if end > start && self.pos_ms >= start && self.pos_ms - behind < start => {
+                    end - (start - (self.pos_ms - behind)) % (end - start)
+                }
+                _ => self.pos_ms - behind,
+            }
         } else {
             self.pos_ms
+        }
+    }
+
+    /// `ms` moved on by `step_ms` through the active loop, without the side
+    /// effects of [`next_frame`](Self::next_frame).
+    fn advance(&self, ms: f64, step_ms: f64) -> f64 {
+        let next = ms + step_ms;
+        match self.loop_ms {
+            Some((start, end)) if end > start && step_ms > 0.0 && ms < end && next >= end => start + (next - end) % (end - start),
+            _ => next,
         }
     }
 
@@ -303,16 +394,58 @@ impl Voice {
     /// is heard at `audible_at`.
     fn render(&mut self, frames: usize, ms_per_frame: f64, frame_time: Duration, audible_at: Instant, out: &mut Vec<f32>) {
         out.clear();
+        let moving = self.playing;
+        let heard = self.heard_ms(ms_per_frame);
+        self.wrapped = false;
         if self.stretch_active() {
             self.render_stretched(frames, ms_per_frame, frame_time, audible_at, out);
+        } else {
+            if self.stretching {
+                self.leave_stretch(ms_per_frame);
+            }
+            let mut at = audible_at;
+            for _ in 0..frames {
+                let s = self.next_frame(self.speed * ms_per_frame, at);
+                out.extend_from_slice(&s);
+                at += frame_time;
+            }
+        }
+        self.mix_handover(frames, ms_per_frame, out);
+        if moving && !self.wrapped {
+            if self.motion == 0.0 {
+                self.motion_from_ms = heard;
+            }
+            self.motion = self.speed;
+        } else {
+            self.motion = 0.0;
+        }
+    }
+
+    /// The stretcher stops (master tempo off, pause, reverse): carry on from
+    /// what's being heard, not from where the stretcher read up to. Beats up
+    /// to there were already reported, so while playing on the beat
+    /// bookkeeping stays.
+    fn leave_stretch(&mut self, ms_per_frame: f64) {
+        let read = self.pos_ms;
+        let heard = self.heard_ms(ms_per_frame);
+        self.stretching = false;
+        self.handover = None;
+        if self.needs_prime {
+            // A jump replaced the position anyway.
             return;
         }
-        self.stretching = false;
-        let mut at = audible_at;
-        for _ in 0..frames {
-            let s = self.next_frame(self.speed * ms_per_frame, at);
-            out.extend_from_slice(&s);
-            at += frame_time;
+        self.pos_ms = heard;
+        if self.playing && self.audio.is_some() {
+            let fade = (HANDOVER_FADE_MS / ms_per_frame) as usize;
+            self.handover = Some(Handover {
+                stretched: true,
+                pos_ms: read,
+                hold: 0,
+                fade_left: fade,
+                fade,
+            });
+        } else {
+            self.resync_beat();
         }
     }
 
@@ -320,17 +453,29 @@ impl Voice {
     /// stretcher fit `frames * speed` frames of it into `frames`.
     fn render_stretched(&mut self, frames: usize, ms_per_frame: f64, frame_time: Duration, audible_at: Instant, out: &mut Vec<f32>) {
         if !self.stretching || self.needs_prime {
-            self.prime(ms_per_frame);
+            // The stretcher's first output only fades in: play the track
+            // directly from here until it's ready.
+            let heard = self.pos_ms;
+            self.prime(ms_per_frame, frame_time, audible_at);
+            let fade = (HANDOVER_FADE_MS / ms_per_frame) as usize;
+            self.handover = Some(Handover {
+                stretched: false,
+                pos_ms: heard,
+                hold: self.stretch.output_latency(),
+                fade_left: fade,
+                fade,
+            });
         }
         self.stretching = true;
         self.needs_prime = false;
+        self.stretch_speed = self.speed;
 
         let speed = self.speed;
         let wanted = frames as f64 * speed + self.carry;
         let inputs = wanted.floor() as usize;
         self.carry = wanted - inputs as f64;
         // Beats read now are heard after the stretcher's delay.
-        let delay = frame_time.mul_f64(self.stretch_delay_frames());
+        let delay = frame_time.mul_f64(self.stretch_delay_frames(speed));
         self.stretch_in.clear();
         for k in 0..inputs {
             let at = audible_at + frame_time.mul_f64(k as f64 / speed) + delay;
@@ -341,18 +486,66 @@ impl Voice {
         self.stretch.process(&self.stretch_in, &mut out[..]);
     }
 
-    /// Restart the stretcher at the current position, pre-rolled with the
-    /// audio just before it so playback doesn't fade in from silence.
-    fn prime(&mut self, ms_per_frame: f64) {
+    /// Restart the stretcher so that what it plays is heard from the current
+    /// position on. Audio it reads is heard after its delay, so it reads
+    /// ahead by that much, through the loop and reporting the beats passed
+    /// at the moment they'll be heard; that audio pre-rolls it.
+    fn prime(&mut self, ms_per_frame: f64, frame_time: Duration, audible_at: Instant) {
         self.stretch.reset();
         self.carry = 0.0;
-        let preroll = self.stretch.input_latency();
+        let speed = self.speed;
+        let ahead = (self.stretch_delay_frames(speed) * speed).round() as usize;
         self.stretch_in.clear();
-        for j in (1..=preroll).rev() {
-            let s = self.sample_at(self.pos_ms - j as f64 * ms_per_frame);
+        for k in 0..ahead {
+            let s = self.next_frame(ms_per_frame, audible_at + frame_time.mul_f64(k as f64 / speed));
             self.stretch_in.extend_from_slice(&s);
         }
-        self.stretch.seek(&self.stretch_in, self.speed);
+        self.stretch.seek(&self.stretch_in, speed);
+    }
+
+    /// Play the outgoing path of a [`Handover`] under `out` and fade it out.
+    fn mix_handover(&mut self, frames: usize, ms_per_frame: f64, out: &mut [f32]) {
+        let Some(mut h) = self.handover.take() else {
+            return;
+        };
+        if !self.playing {
+            return;
+        }
+        self.handover_out.clear();
+        if h.stretched {
+            let inputs = (frames as f64 * self.stretch_speed).round() as usize;
+            self.stretch_in.clear();
+            for _ in 0..inputs {
+                let s = self.sample_at(h.pos_ms);
+                self.stretch_in.extend_from_slice(&s);
+                h.pos_ms = self.advance(h.pos_ms, ms_per_frame);
+            }
+            self.handover_out.resize(frames * 2, 0.0);
+            self.stretch.process(&self.stretch_in, &mut self.handover_out[..]);
+        } else {
+            let step = self.speed * ms_per_frame;
+            for _ in 0..frames {
+                let s = self.sample_at(h.pos_ms);
+                self.handover_out.extend_from_slice(&s);
+                h.pos_ms = self.advance(h.pos_ms, step);
+            }
+        }
+        for (frame, old) in out.chunks_mut(2).zip(self.handover_out.chunks(2)) {
+            let g = if h.hold > 0 {
+                h.hold -= 1;
+                1.0
+            } else if h.fade_left > 0 {
+                h.fade_left -= 1;
+                h.fade_left as f32 / h.fade.max(1) as f32
+            } else {
+                0.0
+            };
+            frame[0] = frame[0] * (1.0 - g) + old[0] * g;
+            frame[1] = frame[1] * (1.0 - g) + old[1] * g;
+        }
+        if h.hold > 0 || h.fade_left > 0 {
+            self.handover = Some(h);
+        }
     }
 
     /// The end of the track, if known: the decoded length once decoding has
@@ -420,6 +613,7 @@ impl Voice {
         }
 
         if jumped {
+            self.wrapped = true;
             // A loop restarting on a beat plays that beat again.
             self.pos_ms = next;
             let i = self.grid.index_at(next);
@@ -597,7 +791,14 @@ impl Renderer {
         let smoothing = 1.0 - (-1.0 / (0.005 * self.rate as f32)).exp();
 
         for (d, voice) in self.voices.iter_mut().enumerate() {
-            self.feedback[d].publish(voice.heard_ms(ms_per_frame), audible_at, voice.speed, voice.playing, voice.ended);
+            self.feedback[d].publish(
+                voice.heard_ms(ms_per_frame),
+                audible_at,
+                voice.speed,
+                (voice.motion, voice.motion_from_ms),
+                voice.playing,
+                voice.ended,
+            );
             voice.render(frames, ms_per_frame, frame_time, audible_at, &mut self.voice_buf);
             let ch = &self.gains.channels[d];
             let target = ch.level.get();
@@ -1014,10 +1215,113 @@ mod tests {
         let (engine, locked) = play_sine_at(1.1, true);
         let f = frequency(&locked);
         assert!((f - 440.0).abs() < 5.0, "key lock keeps 440 Hz: {f} Hz");
-        // 2 s at 1.1x reads 2.2 s of track; what's heard lags by the
-        // stretcher's delay.
+        // The stretcher reads ahead by its delay, so what's heard is where
+        // varispeed would be: the time rendered at 1.1x.
+        let rendered_ms = (RATE * 2 / 512 * 512) as f64 * 1000.0 / RATE as f64;
         let heard = position(&engine, 0);
-        assert!((1900.0..2200.0).contains(&heard), "heard position {heard} ms");
+        assert!((heard - rendered_ms * 1.1).abs() < 1.0, "heard position {heard} ms");
+    }
+
+    #[test]
+    fn heard_position_runs_smoothly_and_glides_into_a_pause() {
+        let engine = AudioEngine::new();
+        load(&engine, 0, Some(track(5000, 1000)), BeatGrid::constant(12000, 0.0), None);
+        engine.send(0, VoiceCommand::SetPlaying(true));
+        let fb = engine.feedback(0);
+        let latency = Duration::from_millis(50);
+        let mut r = engine.renderer.lock().unwrap();
+        // 10 ms blocks, each heard 50 ms after it's rendered: the published
+        // position runs 50 ms ahead of what's heard.
+        r.render(480, Instant::now() + latency);
+        r.render(480, Instant::now() + latency);
+        assert_eq!(fb.position_ms(), 0.0, "nothing heard before playback started");
+        for _ in 0..20 {
+            r.render(480, Instant::now() + latency);
+        }
+        // 220 ms rendered; the last block, from 210 ms, is heard in 50 ms.
+        let heard = fb.position_ms();
+        assert!((heard - 160.0).abs() < 5.0, "heard {heard} ms, not the 210 ms read");
+        engine.send(0, VoiceCommand::SetPlaying(false));
+        r.render(480, Instant::now() + latency);
+        let gliding = fb.position_ms();
+        assert!(gliding < 220.0, "still hearing the audio before the pause: {gliding}");
+        std::thread::sleep(latency + Duration::from_millis(5));
+        let stopped = fb.position_ms();
+        assert!((stopped - 220.0).abs() < 1e-6, "stops where playback stopped: {stopped}");
+    }
+
+    #[test]
+    fn a_loop_shortened_behind_the_playhead_keeps_it_in() {
+        let engine = AudioEngine::new();
+        load(&engine, 0, Some(track(10_000, 1000)), BeatGrid::constant(12000, 0.0), None);
+        engine.send(0, VoiceCommand::SetLoop(Some((1000.0, 3000.0))));
+        engine.send(0, VoiceCommand::Seek(1000.0));
+        engine.send(0, VoiceCommand::SetPlaying(true));
+        engine.render_now(RATE * 3 / 2); // 1.5 s into the 2 s loop
+        engine.send(0, VoiceCommand::SetLoop(Some((1000.0, 2000.0))));
+        assert!((position(&engine, 0) - 1500.0).abs() < 1e-3, "halved: same place in the loop");
+        engine.send(0, VoiceCommand::SetLoop(Some((1000.0, 1200.0))));
+        assert!((position(&engine, 0) - 1100.0).abs() < 1e-3, "shorter still: wrapped, 500 ms in is 100 ms in");
+        engine.render_now(RATE * 2);
+        let pos = position(&engine, 0);
+        assert!((1000.0..1200.0).contains(&pos), "still looping: {pos}");
+    }
+
+    /// Silence with a 1 kHz burst from 500 ms to 600 ms, at 48 kHz.
+    fn burst() -> Arc<TrackAudio> {
+        let frames: Vec<[i16; 2]> = (0..2000 * 48)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                let v = if (0.5..0.6).contains(&t) {
+                    ((2.0 * std::f64::consts::PI * 1000.0 * t).sin() * 16_000.0) as i16
+                } else {
+                    0
+                };
+                [v, v]
+            })
+            .collect();
+        TrackAudio::from_frames(48_000, &frames)
+    }
+
+    /// Plays [`burst`] from the start in 512-frame blocks, sending
+    /// `switch(block)` before each block, and returns when the burst is
+    /// first heard at half its level, in ms.
+    fn burst_heard_at(mut switch: impl FnMut(&AudioEngine, usize)) -> f64 {
+        let engine = AudioEngine::new();
+        load(&engine, 0, Some(burst()), BeatGrid::constant(12000, 0.0), None);
+        engine.send(0, VoiceCommand::SetPlaying(true));
+        let mut left = Vec::new();
+        for block in 0..(RATE / 512) {
+            switch(&engine, block);
+            left.extend(engine.render_now(512).iter().step_by(2).copied());
+        }
+        let onset = left.iter().position(|s| s.abs() > 0.25).expect("burst heard");
+        onset as f64 * 1000.0 / RATE as f64
+    }
+
+    #[test]
+    fn master_tempo_switches_without_a_jump() {
+        let varispeed = burst_heard_at(|_, _| {});
+        assert!((varispeed - 500.0).abs() < 1.0, "direct: {varispeed} ms");
+
+        let from_start = burst_heard_at(|e, b| {
+            if b == 0 {
+                e.send(0, VoiceCommand::SetMasterTempo(true));
+            }
+        });
+        let on_while_playing = burst_heard_at(|e, b| {
+            if b == 20 {
+                e.send(0, VoiceCommand::SetMasterTempo(true));
+            }
+        });
+        let off_while_playing = burst_heard_at(|e, b| match b {
+            0 => e.send(0, VoiceCommand::SetMasterTempo(true)),
+            25 => e.send(0, VoiceCommand::SetMasterTempo(false)),
+            _ => {}
+        });
+        for (what, at) in [("on from the start", from_start), ("on while playing", on_while_playing), ("off while playing", off_while_playing)] {
+            assert!((at - 500.0).abs() < 5.0, "master tempo {what}: burst heard at {at} ms");
+        }
     }
 
     #[test]

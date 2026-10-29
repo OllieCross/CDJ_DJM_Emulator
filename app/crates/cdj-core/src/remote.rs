@@ -961,6 +961,13 @@ mod tests {
         handle(shared, &fader([Stop, NoChange, NoChange, NoChange]), BLT_IP, broadcast());
         handle(shared, &fader([Stop, NoChange, NoChange, NoChange]), BLT_IP, broadcast());
         assert!(!p1.is_playing());
+        // The audio thread applies the jump on its next block.
+        for _ in 0..50 {
+            if p1.view().position_ms == p1.view().cue_ms {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(p1.view().position_ms, p1.view().cue_ms, "back at the cue");
         assert!(r.remote_view().log.iter().any(|e| e.text == "fader start: player 1"));
     }

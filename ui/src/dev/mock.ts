@@ -77,6 +77,7 @@ function emptyPlayer(n: number): PlayerView {
     hot_cues: Array(8).fill(null),
     memory_cues: [],
     active_loop: null,
+    loop_in_ms: null,
     loaded: null,
     media: [],
     model: null,
@@ -159,6 +160,7 @@ function load(n: number, id: number, source: number, slot: Slot) {
       null,
     ],
     active_loop: null,
+    loop_in_ms: null,
   });
 }
 
@@ -353,6 +355,19 @@ function handle(cmd: string, a: Args = {}): unknown {
     }
     case "exit_loop":
       if (p) p.active_loop = null;
+      return;
+    case "loop_in":
+      if (p?.loaded) p.loop_in_ms = p.cue_ms = p.position_ms;
+      return;
+    case "loop_out":
+      if (p?.loop_in_ms != null && p.position_ms > p.loop_in_ms) {
+        p.active_loop = { start_ms: p.loop_in_ms, end_ms: p.position_ms, beats: null, active: true };
+        p.position_ms = p.loop_in_ms;
+      }
+      if (p) p.loop_in_ms = null;
+      return;
+    case "clear_hot_cue":
+      if (p) p.hot_cues[a.pad] = null;
       return;
     case "set_pitch_fader":
       if (p) p.pitch_fader = a.position;

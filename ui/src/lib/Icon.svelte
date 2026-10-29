@@ -12,8 +12,8 @@
     <path d="M2 3.5 8 8l-6 4.5z" fill="currentColor" stroke="none" /><path d="M10.5 4v8M14 4v8" stroke-width="1.8" />
   {:else if name === "usb"}
     <rect x="4.5" y="6" width="7" height="8.5" rx="1" /><path d="M6 6V2h4v4M7 3.5h.01M9 3.5h.01" />
-  {:else if name === "sd"}
-    <path d="M4 1.5h6l3 3v10H4z" /><path d="M6.5 1.5v3M8.5 1.5v3M10.5 2.5v2" />
+  {:else if name === "drive"}
+    <rect x="1.5" y="4.5" width="13" height="7" rx="1.5" /><path d="M4 8h4" /><path d="M11.5 8h.01" stroke-width="2" />
   {:else if name === "link"}
     <path d="M6.5 9.5 9.5 6.5M7 4.5l1.3-1.3a2.8 2.8 0 0 1 4 4L11 8.5M9 11.5l-1.3 1.3a2.8 2.8 0 0 1-4-4L5 7.5" />
   {:else if name === "loop"}

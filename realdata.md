@@ -154,6 +154,19 @@ Each scenario is ~30 s of capture unless noted. Hit **Stop** in Wireshark and **
 
 **Captures:** every status packet over a full track, beat number progression, time fields at known positions (useful for verifying time encoding for Bug 1).
 
+### 11. `11_showkontrol.pcapng` - ShowKontrol R27 reading the players
+
+ShowKontrol must be on the Pro DJ Link network itself (a mirror port only listens): run it on a second laptop plugged into a normal switch port, or give the capture Mac a second ethernet adapter on a normal port. Use the capture filter `udp or tcp` for this one, so nothing ShowKontrol opens is missed.
+
+1. Both CDJs on, a track loaded on each, ShowKontrol R27 closed.
+2. Wireshark: Start fresh capture.
+3. Open ShowKontrol (ProDJ Link adapter set to the port's interface, Link ID on Auto). Wait until its Viewer shows titles, artwork and waveforms for both decks.
+4. Play CDJ-1 for 10 s, pause it, wait 10 s.
+5. Load a different track on CDJ-2 and wait for ShowKontrol to show its waveform.
+6. Stop capture. Note ShowKontrol's IP and Link ID.
+
+**Captures:** what the players answer to ShowKontrol's 0x68 (about every 1 s) and 0x6b (about every 5 s) packets on UDP 50002, and the connection ShowKontrol then opens for titles, artwork and waveforms. Against the emulator ShowKontrol sends those packets, gets no answer, and never opens a connection, so it shows only track numbers.
+
 ## After capturing
 
 1. Zip all .pcapng files: `zip -r realdata_captures_YYYYMMDD.zip *.pcapng`.
@@ -171,6 +184,7 @@ Each scenario is ~30 s of capture unless noted. Hit **Stop** in Wireshark and **
 - **Bug 5 (artwork):** byte-diff ARTWORK_REQ/RESP against the emulator. Confirm field ordering, leading bytes, any padding.
 - **Bug 6 (waveform encoding):** byte-diff a real PWV4/PWV5/PWV6 response payload against what the emulator currently emits. The decompile already pinned the format (2 bytes/col packed BE for PWV5 RGB detail, 6 bytes/col raw for PWV4 RGB preview, 3 bytes/col for PWV6 THREE_BAND); the capture verifies those independently and catches anything the decompile missed.
 - **Bug 7 (beat grid):** confirm the 20-byte leading header contents and the 16-byte per-record padding bytes.
+- **ShowKontrol (no titles or waveforms):** learn the replies to its 0x68 / 0x6b packets and how it fetches track data once answered, then answer them the same way.
 
 ## Quick capture without a switch (fallback)
 

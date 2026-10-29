@@ -73,13 +73,4 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-
-  select {
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 5px 6px;
-    font: inherit;
-  }
 </style>

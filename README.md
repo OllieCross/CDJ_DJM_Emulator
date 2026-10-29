@@ -12,12 +12,30 @@
 A macOS app that runs up to **4 virtual CDJ players and 1 virtual DJM mixer**
 on a Pro DJ Link network inside your Mac, so that **ShowKontrol**, **Beat Link
 Trigger** and other Pro DJ Link software see a credible DJ setup without any
-physical hardware. Decks load tracks from rekordbox USB/SD exports, play them
+physical hardware. Decks load tracks from rekordbox exports on external
+drives or in folders, play them
 through a virtual mixer, and report everything (status, beats, playhead, track
 metadata, waveforms) on the network the way real players do.
 
-**Why:** a smaller rental company can program timecode, lighting or video
-shows against individual tracks without owning or renting four CDJs and a DJM.
+**Why:** to test the data path a show actually runs on, without CDJs on the
+desk. ShowKontrol R27 (October 2026) can already build cue timelines at home
+with its Internal Players, but those decks exist only inside ShowKontrol. This
+rig puts players and a mixer on the network, so you can check:
+
+- **Beat Link Trigger** shows, triggers and expressions against live players
+  (its own simulator works only offline);
+- **TCNet** consumers such as Resolume or a lighting desk, fed by ShowKontrol
+  or the PRO DJ LINK Bridge;
+- **DJM data**: on-air, channel faders and fader start;
+- **rekordbox USB data the way players report it**: rekordbox IDs, titles,
+  beat grids, cues and waveforms over the dbserver;
+- **ShowKontrol's Pro DJ Link input**, including the free Core edition (which
+  has no Internal Players), and whether a show programmed at home fires when
+  the titles come from players;
+- **your own Pro DJ Link software**, by hand or headless in CI.
+
+ShowKontrol and the Bridge haven't been tested against the rig yet; see
+[Progress](#progress).
 
 ![The full rig: four decks, the mixer and the browser](docs/screenshots/rig.png)
 <sub>Four decks (two CDJ-3000X, a CDJ-2000NXS, one switched off with its model picker), the DJM-V10 and the browser. Shown in the UI's preview mode with demo tracks.</sub>
@@ -38,7 +56,6 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
   - [Testing and verification](#testing-and-verification)
   - [Known limits](#known-limits)
   - [Project layout](#project-layout)
-  - [Why not run the real firmware?](#why-not-run-the-real-firmware)
   - [Credits](#credits)
   - [License](#license)
 
@@ -50,13 +67,13 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
 | ✅ | Rig: switch players 1-4 and the mixer on and off at runtime | Done |
 | ✅ | Virtual network (`feth` pair) set up from the app with one password prompt | Done |
 | ✅ | Live run against beat-link (the library inside Beat Link Trigger) | Sees all devices, status, beats, positions, mixer data; fetches metadata, beat grids and waveforms |
-| ✅ | Media: USB/SD slots, LINK loading between players, browsing, dbserver | Done; dbserver checked with beat-link's own client |
+| ✅ | Media: a media slot per player, LINK loading between players, browsing, dbserver | Done; dbserver checked with beat-link's own client |
 | ✅ | Deck engine: CUE, hot cues, memory cues, loops, tempo, sync, master, reverse, quantize | Done |
 | ✅ | Audio engine: one output, mixer DSP (trim, 3-band EQ, faders, crossfader), master tempo (key lock) | Done |
 | ✅ | CDJ-style UI: deck screens with rekordbox waveforms, jog wheel, DJM mixer, browser | Done |
 | ✅ | Model picker: 6 player models, 4 mixer models | Done; some per-model details are educated guesses |
 | 🟡 | Compare against real gear (CDJ-3000X ×2, DJM-A9) | Capture script ready, recordings pending |
-| ⬜ | ShowKontrol end-to-end | Not tested yet |
+| 🟡 | ShowKontrol end-to-end | R27 sees the players and mixer, positions and on-air; no titles, artwork or waveforms yet (see Known limits) |
 | ✅ | Commands from client apps: tempo-master handoff, sync, fader start, load track, media queries | Done; each one checked live with beat-link |
 | ⬜ | NFS file sharing | Only if ShowKontrol turns out to need it |
 | ⬜ | Signed `.app`, saving sessions, MIDI control, Windows | Later |
@@ -75,9 +92,11 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
   bars to the next memory cue.
 - Scrolling waveform in rekordbox's colours with the beat grid, cue points
   and loops; whole-track overview you click to jump (needle search).
-- CUE with hold-to-preview, hot cues A-H (in their rekordbox colours) and
-  memory cues from rekordbox, beat loops, loop in/out, reloop, ½× / 2×.
-- Tempo fader with ±6 / 10 / 16 / WIDE, master tempo (key lock), reverse,
+- CUE with hold-to-preview, hot cues A-H (in their rekordbox colours;
+  right-click clears one) and memory cues from rekordbox, beat loops, loop
+  in/out (IN also sets the cue point, as on a CDJ), reloop, ½× / 2×.
+- Tempo fader with ±6 / 10 / 16 / WIDE (double- or right-click: 0%), master
+  tempo (key lock, switched without a gap or a jump), reverse,
   quantize, SYNC and MASTER, and a jog wheel (scrub when paused, nudge when
   playing).
 - Beats follow the track's rekordbox beat grid; each beat packet goes out
@@ -93,8 +112,9 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
 <img src="docs/screenshots/browse.png" alt="The browser" width="360" align="right">
 
 **Media and browsing**
-- USB and SD slot on every player. Exports on mounted drives are found
-  automatically; any export folder can be added.
+- One media slot on every player (client apps see it as the player's USB
+  slot). Exports on mounted drives are found automatically; any export
+  folder can be added.
 - Any player loads from any other player's media over LINK.
 - Browser with playlists and folders, tracks, artists, albums and search;
   keyboard navigation like a CDJ's rotary; LOAD TO deck 1-4.
@@ -113,7 +133,7 @@ apps) send to real CDJs:
   and beat.
 - **Sync** on / off and "become master".
 - **Fader start**: play, or back to the cue point and stop.
-- **Load track** from any player's USB or SD (over LINK), acknowledged as a
+- **Load track** from any player's media (over LINK), acknowledged as a
   player does.
 - **Media queries**: what is in a slot (name, date, track and playlist
   counts, size and free space).
@@ -171,8 +191,8 @@ in `ui/src-tauri/target/release/bundle/macos/`).
    and enter your password. This creates the virtual cable.
 2. **Power on:** on each deck pick a model and click **Power on as …**; same
    for the mixer (top right).
-3. **Insert media:** plug in a USB stick with a rekordbox export and pick it in
-   a deck's **USB** slot, or add a folder with **+ FOLDER** in BROWSE. To try it
+3. **Insert media:** plug in a drive with a rekordbox export and pick it in a
+   deck's **MEDIA** slot, or add a folder with **+ FOLDER** in BROWSE. To try it
    without a stick: `app/vendor/rekordcrate/data/complete_export/demo_tracks`
    (two demo tracks with analysis but no audio: they play silently and still
    send beats).
@@ -210,7 +230,7 @@ flowchart LR
     rig --> decks["Decks 1-4"]
     rig --> djm["Virtual DJM"]
     decks --> engine["Audio engine<br/>+ mixer DSP"]
-    media["USB / SD exports"] --> db["dbserver"]
+    media["rekordbox exports"] --> db["dbserver"]
     decks --> pdl["Pro DJ Link<br/>status · beats · positions"]
     djm --> pdl
   end
@@ -249,7 +269,7 @@ Network details (all handled by the setup):
 ## Testing and verification
 
 ```sh
-cd app && cargo test --workspace     # 71 core + 56 protocol tests, 4 beat-link cross-checks
+cd app && cargo test --workspace     # 75 core + 56 protocol tests, 4 beat-link cross-checks
 ```
 
 - **Packets** are checked byte for byte against the templates beat-link
@@ -288,12 +308,15 @@ master/sync and deck controls, one file per step, into `captures/`
 
 - The load-track acknowledgment's layout isn't documented; beat-link only
   reads who sent it. A capture from a real CDJ would confirm the rest.
-- Which commands ShowKontrol sends hasn't been checked yet.
-- No NFS file sharing; clients use the dbserver. Whether ShowKontrol needs
-  NFS isn't known yet.
+- ShowKontrol R27 shows only track numbers: it sends each player packets of
+  kind 0x68 (about every second) and 0x6b (about every 5 s) on UDP 50002,
+  which aren't publicly documented, gets no answer, and never connects for
+  track data. Scenario 11 in [realdata.md](realdata.md) captures what real
+  players answer.
+- No NFS file sharing; clients use the dbserver.
 - Model differences beyond those listed above (per-model menus, the
   DJM-V10's 4-band EQ, older players' track-data limits) aren't emulated.
-- Not yet compared against captures of real units or tested with ShowKontrol.
+- Not yet compared against captures of real units.
 - macOS only.
 
 ## Project layout
@@ -310,24 +333,7 @@ app/                      Rust workspace
     capture-cdj.sh        Guided capture of real gear
 ui/                       Tauri app: Svelte UI (src/) and Rust shell (src-tauri/)
 docs/screenshots/         README images
-discovery.md              Firmware / protocol / architecture notes
 ```
-
-## Why not run the real firmware?
-
-We looked. [discovery.md §1](discovery.md#1-what-the-provided-files-actually-are)
-has the detail; short version:
-
-- The official `.UPD` firmware file is a LUKS-encrypted volume. AlphaTheta
-  holds the key; no PC-side unlock path exists.
-- The "open source" tarball AlphaTheta publishes is only the GPL-mandated
-  Yocto / kernel bits. The CDJ DJ application itself is proprietary and
-  encrypted inside that `.UPD`.
-
-So this project is a **clean-room reimplementation of the Pro DJ Link
-protocol** based on the public analysis by the Deep-Symmetry project
-(dysentery, beat-link, crate-digger). No Pioneer / AlphaTheta source code is
-read, linked, or redistributed. The UI uses its own icons and artwork.
 
 ## Credits
 
@@ -342,11 +348,12 @@ read, linked, or redistributed. The UI uses its own icons and artwork.
 
 ## License
 
-Source code: MIT OR Apache-2.0 (see per-crate `Cargo.toml`). The vendored
-rekordcrate is MPL-2.0; Signalsmith Stretch is MIT.
+Source code: MIT OR Apache-2.0, at your option; see [LICENSE.md](LICENSE.md).
+The vendored rekordcrate is MPL-2.0; Signalsmith Stretch is MIT.
 
-The AlphaTheta firmware and source-code drops referenced in `discovery.md`
-are **not** part of this repository; they belong to AlphaTheta Corporation
-and are covered by their own licences. CDJ, DJM, rekordbox and Pro DJ Link
-are trademarks of AlphaTheta Corporation; this project is not affiliated with
-or endorsed by them.
+This is a **clean-room implementation of the Pro DJ Link protocol**, based on
+the public analysis by the Deep-Symmetry project (dysentery, beat-link,
+crate-digger). No Pioneer / AlphaTheta firmware or source code is part of
+this repository, linked or redistributed. The UI uses its own icons and
+artwork. CDJ, DJM, rekordbox and Pro DJ Link are trademarks of AlphaTheta
+Corporation; this project is not affiliated with or endorsed by them.

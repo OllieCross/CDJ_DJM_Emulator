@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "cdj-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "binrw",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "cdj-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "thiserror 1.0.69",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "cdjd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cdj-core",

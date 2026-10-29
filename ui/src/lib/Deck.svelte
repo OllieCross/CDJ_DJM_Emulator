@@ -118,6 +118,7 @@
   }
 
   function jogDown(e: PointerEvent) {
+    if (e.button !== 0) return;
     capture(jog, e);
     jogLast = { angle: jogPointerAngle(e), time: performance.now() };
   }
@@ -151,7 +152,7 @@
       {#if player.running && player.model_name}<span class="model">{player.model_name}</span>{/if}
       {#if player.loaded}
         <span class="src" class:link={linked} title="Track source">
-          <Icon name={linked ? "link" : player.loaded.source_slot === "Usb" ? "usb" : "sd"} size={12} />
+          <Icon name={linked ? "link" : "drive"} size={12} />
           {linked ? `LINK P${player.loaded.source_player}` : slotLabel(player.loaded.source_slot)}
         </span>
       {/if}
@@ -210,8 +211,8 @@
         </div>
       {:else}
         <div class="no-track">
-          <Icon name={player.media.length ? "browse" : "usb"} size={22} />
-          <span>{player.media.length ? "Load a track from BROWSE" : "Insert a USB or SD export below, or load over LINK from BROWSE"}</span>
+          <Icon name={player.media.length ? "browse" : "drive"} size={22} />
+          <span>{player.media.length ? "Load a track from BROWSE" : "Insert media below, or load over LINK from BROWSE"}</span>
         </div>
       {/if}
 
@@ -255,16 +256,22 @@
               class="pad"
               class:set={player.hot_cues[i]}
               style={padStyle(i)}
-              title="Hot cue {name}: press to jump/play, or store here if empty. Shift-click clears."
+              title="Hot cue {name}: press to jump/play, or store here if empty. Right-click clears."
               onclick={(e) => (e.shiftKey ? quick("clear_hot_cue", { pad: i }) : quick("hot_cue", { pad: i }))}
+              oncontextmenu={(e) => {
+                e.preventDefault();
+                quick("clear_hot_cue", { pad: i });
+              }}
             >
               {name}
             </button>
           {/each}
         </div>
         <div class="loops">
-          <button onclick={() => quick("loop_in")}>IN</button>
-          <button onclick={() => quick("loop_out")}>OUT</button>
+          <button class:pending={player.loop_in_ms !== null} title="Loop in (also sets the cue point)" onclick={() => quick("loop_in")}>
+            IN
+          </button>
+          <button class:pending={player.loop_in_ms !== null} title="Loop out" onclick={() => quick("loop_out")}>OUT</button>
           <button class:active={player.active_loop} onclick={() => quick(player.active_loop ? "exit_loop" : "reloop")}>
             {player.active_loop ? "EXIT" : "RELOOP"}
           </button>
@@ -342,7 +349,7 @@
           topIsMax={false}
           centreMark
           length={128}
-          title="Tempo (double-click: 0%)"
+          title="Tempo (double-click or right-click: 0%)"
           onchange={(position) => quick("set_pitch_fader", { position })}
         />
       </div>
@@ -568,15 +575,6 @@
     gap: 6px;
   }
 
-  .off select {
-    background: #15151a;
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    font: inherit;
-    padding: 4px 6px;
-  }
-
   .off .power-big {
     flex: none;
   }
@@ -721,6 +719,18 @@
   button.active {
     color: var(--cue);
     border-color: var(--cue);
+  }
+
+  /* LOOP IN pressed, waiting for OUT: blink like a CDJ. */
+  button.pending {
+    animation: blink 0.5s steps(1) infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      color: var(--cue);
+      border-color: var(--cue);
+    }
   }
 
   .transport {

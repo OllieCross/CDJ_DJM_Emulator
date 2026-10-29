@@ -103,6 +103,55 @@
     color: var(--text);
     font-family: -apple-system, "Helvetica Neue", sans-serif;
     font-size: 13px;
+    /* Dragging a jog wheel, knob or waveform mustn't select text. */
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+
+  :global(input, textarea) {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  :global(img) {
+    -webkit-user-drag: none;
+  }
+
+  /* Flat dropdowns instead of the system's glossy pop-up buttons. */
+  :global(select) {
+    -webkit-appearance: none;
+    appearance: none;
+    font: inherit;
+    color: var(--text);
+    background-color: var(--panel-2);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a8a92' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 10px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 26px 5px 9px;
+    cursor: pointer;
+    transition:
+      border-color 0.12s,
+      background-color 0.12s;
+  }
+
+  :global(select:hover:not(:disabled)) {
+    background-color: #232327;
+    border-color: #3a3a41;
+  }
+
+  :global(select:focus-visible) {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgb(47 168 255 / 0.25);
+  }
+
+  :global(select:disabled) {
+    opacity: 0.45;
+    cursor: default;
   }
 
   :global(button) {

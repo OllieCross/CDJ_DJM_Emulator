@@ -20,7 +20,7 @@
 //! We emit these stages so our virtual devices look authentic on the wire and
 //! so we can later interoperate with a real CDJ/DJM that performs the dance
 //! against us. The exact byte layout in later firmwares has minor deltas that
-//! need pcap validation (see discovery.md §9 risk #1). The field contents we
+//! need pcap validation. The field contents we
 //! emit are correct; trailing "opaque" bytes come from dysentery's published
 //! captures.
 //!

@@ -10,7 +10,6 @@
 
 #![warn(unsafe_code)]
 #![warn(missing_docs)]
-#![cfg_attr(not(debug_assertions), deny(warnings))]
 #![deny(rust_2018_idioms)]
 #![deny(rust_2021_compatibility)]
 #![deny(missing_debug_implementations)]

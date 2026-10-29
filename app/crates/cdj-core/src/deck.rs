@@ -99,6 +99,8 @@ pub struct DeckView {
     /// Beats to the next memory cue, if one is within 64 bars.
     pub cue_countdown: Option<u16>,
     pub active_loop: Option<LoopRegion>,
+    /// LOOP IN pressed here, waiting for LOOP OUT.
+    pub loop_in_ms: Option<f64>,
 }
 
 impl DeckView {
@@ -510,10 +512,14 @@ impl Deck {
         );
     }
 
+    /// LOOP IN: mark where the next loop starts. Like a CDJ's real-time
+    /// cue, the point also becomes the cue point.
     pub fn loop_in(&self) {
         let pos = self.position_ms();
         let mut d = self.inner.lock().unwrap();
-        d.loop_in_ms = Some(Self::quantized(&d, pos));
+        let start = Self::quantized(&d, pos);
+        d.loop_in_ms = Some(start);
+        d.cue_ms = start;
     }
 
     /// End the loop started with [`loop_in`](Self::loop_in) here and start
@@ -709,6 +715,7 @@ impl Deck {
             memory_cues: d.memory_cues.clone(),
             cue_countdown,
             active_loop: d.loop_region.filter(|r| r.active),
+            loop_in_ms: d.loop_in_ms,
         }
     }
 }
@@ -862,6 +869,27 @@ pub(crate) mod tests {
         assert!(deck.view().active_loop.is_none());
         deck.reloop();
         assert!(deck.view().active_loop.is_some());
+    }
+
+    #[test]
+    fn loop_in_and_out_make_a_loop_and_set_the_cue() {
+        let (_e, deck) = deck_with_track(&[]);
+        deck.seek(2100.0);
+        settle();
+        deck.loop_in();
+        let v = deck.view();
+        assert_eq!((v.loop_in_ms, v.cue_ms), (Some(2000.0), 2000.0), "quantized in point, also the cue");
+        // OUT snaps back to the beat behind the playhead: still a loop.
+        deck.seek(3200.0);
+        settle();
+        deck.loop_out();
+        let v = deck.view();
+        let r = v.active_loop.unwrap();
+        assert_eq!((r.start_ms, r.end_ms, v.loop_in_ms), (2000.0, 3000.0, None));
+        deck.play();
+        settle();
+        let pos = deck.position_ms();
+        assert!((2000.0..3000.0).contains(&pos), "playing inside the loop: {pos}");
     }
 
     #[test]

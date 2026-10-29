@@ -1,6 +1,6 @@
 <script lang="ts">
   // A hardware-style fader: drag the cap, click the slot to jump, scroll to
-  // nudge, double-click to reset. Shift drags finely.
+  // nudge, double-click or right-click to reset. Shift drags finely.
   import { capture } from "./pointer";
 
   let {
@@ -68,6 +68,7 @@
   let drag: { start: number; fraction: number } | null = null;
 
   function down(e: PointerEvent) {
+    if (e.button !== 0) return;
     capture(slot, e);
     const onCap = Math.abs(fractionAt(e) - fraction) * (length - CAP) < CAP;
     if (!onCap) set(fractionAt(e));
@@ -114,6 +115,10 @@
   onpointerup={() => (drag = null)}
   onpointercancel={() => (drag = null)}
   ondblclick={() => reset !== undefined && emit(reset)}
+  oncontextmenu={(e) => {
+    e.preventDefault();
+    if (reset !== undefined) emit(reset);
+  }}
   onwheel={wheel}
   onkeydown={key}
 >

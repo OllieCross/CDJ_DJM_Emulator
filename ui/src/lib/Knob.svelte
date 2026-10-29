@@ -43,6 +43,7 @@
   }
 
   function down(e: PointerEvent) {
+    if (e.button !== 0) return;
     capture(e.currentTarget as Element, e);
     drag = { y: e.clientY, value: shown };
   }

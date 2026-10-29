@@ -204,6 +204,8 @@ struct PlayerView {
     hot_cues: Vec<Option<HotCue>>,
     memory_cues: Vec<f64>,
     active_loop: Option<LoopRegion>,
+    /// LOOP IN pressed, waiting for LOOP OUT.
+    loop_in_ms: Option<f64>,
     loaded: Option<LoadedView>,
     /// What is in this player's slots (kept while it is off).
     media: Vec<SlotView>,
@@ -349,6 +351,7 @@ fn snapshot(state: &AppState) -> RigSnapshot {
                 model_name: Some(h.model.display_name().into()),
                 memory_cues: v.memory_cues.clone(),
                 active_loop: v.active_loop,
+                loop_in_ms: v.loop_in_ms,
                 loaded: v.loaded.as_ref().and_then(|t| {
                     Some(LoadedView {
                         track: t.library.track_by_id(t.track_id)?.into(),

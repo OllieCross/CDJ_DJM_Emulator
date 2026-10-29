@@ -197,7 +197,7 @@
         title={s.name}
         onclick={() => (sourceKey = `${s.player}:${s.slot}`)}
       >
-        <Icon name={s.slot === "Usb" ? "usb" : "sd"} size={11} />
+        <Icon name="drive" size={11} />
         P{s.player} {slotLabel(s.slot)}
       </button>
     {/each}
@@ -263,7 +263,7 @@
     </div>
   {:else}
     <div class="empty big">
-      {loadError ?? (sources.length ? "Reading media…" : "Power on a player, then insert a USB/SD export into one of its slots.")}
+      {loadError ?? (sources.length ? "Reading media…" : "Power on a player, then insert media (a drive or folder with a rekordbox export).")}
     </div>
   {/if}
 

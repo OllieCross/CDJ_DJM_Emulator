@@ -201,13 +201,9 @@
   }
 
   .model {
-    background: #15151a;
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    font: inherit;
     font-weight: 700;
-    padding: 2px 4px;
+    padding-top: 3px;
+    padding-bottom: 3px;
   }
 
   .hint {
@@ -238,14 +234,10 @@
   .output select {
     flex: 1;
     min-width: 0;
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    font: inherit;
     font-weight: 400;
     font-size: 11px;
-    padding: 3px 4px;
+    padding-top: 3px;
+    padding-bottom: 3px;
   }
 
   .strips {

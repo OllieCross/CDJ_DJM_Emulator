@@ -101,6 +101,8 @@ export interface PlayerView {
   hot_cues: (HotCue | null)[];
   memory_cues: number[];
   active_loop: LoopRegion | null;
+  /// LOOP IN pressed, waiting for LOOP OUT.
+  loop_in_ms: number | null;
   loaded: LoadedView | null;
   media: SlotView[];
   /// Model id while on, e.g. "Cdj3000".
@@ -166,7 +168,7 @@ export interface RigSnapshot {
 }
 
 export function slotLabel(slot: Slot): string {
-  return slot === "Usb" ? "USB" : "SD";
+  return slot === "Usb" ? "MEDIA" : "SD";
 }
 
 export function formatTime(ms: number): string {

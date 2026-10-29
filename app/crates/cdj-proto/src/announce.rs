@@ -9,7 +9,7 @@
 //! CDJ/DJM/rekordbox on the same LAN accepts our packets as authentic.
 //!
 //! These fixtures **must** be re-validated against a real pcap capture once
-//! hardware is available (see discovery.md §9 risk #1). Byte-level tests in
+//! hardware is available. Byte-level tests in
 //! this module currently verify round-trip encode-decode only; golden-byte
 //! fixtures will be added when we have an authoritative capture.
 //!
