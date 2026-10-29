@@ -12,6 +12,7 @@ use cdj_core::library::{Library, TrackInfo};
 use cdj_core::media::{find_exports, MediaCatalog, Slot};
 use cdj_core::mixer::{CrossfaderAssign, MixerControls};
 use cdj_core::models::{MixerModel, PlayerModel};
+use cdj_core::remote::RemoteView;
 use cdj_core::rig::{Rig, RigConfig, MAX_PLAYERS};
 use clap::Parser;
 use serde::Serialize;
@@ -114,6 +115,7 @@ fn build_rig(plan: &FethPlan) -> Result<Rig, String> {
         addressing,
         initial_bpm_hundredths: 12000,
         beat_grid_offset_ms: 0,
+        listen_ports: Some(Default::default()),
     }))
 }
 
@@ -258,6 +260,7 @@ struct RigSnapshot {
     mixer: MixerView,
     sources: Vec<SourceView>,
     audio: AudioView,
+    remote: RemoteView,
 }
 
 #[derive(Serialize, Clone)]
@@ -391,9 +394,10 @@ fn snapshot(state: &AppState) -> RigSnapshot {
         },
         sources,
         audio: AudioView {
-            device: rig.and_then(|r| r.output_device()),
+            device: rig.as_ref().and_then(|r| r.output_device()),
             muted: *state.audio_muted.lock().unwrap(),
         },
+        remote: rig.as_ref().map(|r| r.remote_view()).unwrap_or_default(),
     }
 }
 

@@ -11,9 +11,11 @@
 //! the same Mac would otherwise get every broadcast twice and count each
 //! beat double. Without configured clients those packets are broadcast.
 //!
-//! Devices send from ephemeral ports and never bind 50000-50002: Beat Link
-//! Trigger binds those ports as wildcard sockets without address reuse, so a
-//! bound emulator socket would stop it from starting.
+//! Devices send from ephemeral ports and never bind 50000: Beat Link Trigger
+//! binds the Pro DJ Link ports as wildcard sockets without address reuse, so
+//! a bound emulator socket would stop it from starting. Players listen for
+//! commands on 50001-50002 only while a client app holds those ports; see
+//! [`crate::remote`].
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -95,8 +95,21 @@ impl Interface {
 /// only route for the /30 subnet, and without `SO_DONTROUTE` the kernel returns
 /// EHOSTUNREACH on the very first send.
 pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Result<UdpSocket> {
+    bind_device_socket(SocketAddrV4::new(local_ip, 0), iface_name, false)
+}
+
+/// A socket a virtual device listens for commands on: `local` is the
+/// device's address (or the broadcast address) and a Pro DJ Link port.
+/// `SO_REUSEADDR` lets it share the port with a client app's wildcard
+/// socket; see [`crate::remote`] for when that is safe.
+pub fn bind_listener(local: SocketAddrV4, iface_name: &str) -> std::io::Result<UdpSocket> {
+    bind_device_socket(local, iface_name, true)
+}
+
+fn bind_device_socket(local: SocketAddrV4, iface_name: &str, reuse_address: bool) -> std::io::Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_broadcast(true)?;
+    sock.set_reuse_address(reuse_address)?;
     // On macOS the feth-plan deletes the connected route for our subnet so the
     // client app (BLT/ShowKontrol) holds the only route via feth1. We need to
     // force every send out of feth0 anyway, including unicast to peers on the
@@ -152,7 +165,7 @@ pub async fn bind_sender(local_ip: Ipv4Addr, iface_name: &str) -> std::io::Resul
     #[cfg(not(unix))]
     let _ = iface_name;
     sock.set_nonblocking(true)?;
-    sock.bind(&SocketAddr::V4(SocketAddrV4::new(local_ip, 0)).into())?;
+    sock.bind(&SocketAddr::V4(local).into())?;
     let std_sock: std::net::UdpSocket = sock.into();
     UdpSocket::from_std(std_sock)
 }

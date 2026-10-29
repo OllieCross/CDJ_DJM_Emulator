@@ -4,6 +4,7 @@ import java.util.HexFormat;
 
 import org.deepsymmetry.beatlink.Beat;
 import org.deepsymmetry.beatlink.CdjStatus;
+import org.deepsymmetry.beatlink.MediaDetails;
 import org.deepsymmetry.beatlink.MixerStatus;
 import org.deepsymmetry.beatlink.PrecisePosition;
 
@@ -93,6 +94,19 @@ public class CrossCheck {
                     System.out.println(p + "pitch=" + pp.getPitch());
                     System.out.println(p + "bpm=" + pp.getBpm());
                     System.out.println(p + "effectiveTempo=" + pp.getEffectiveTempo());
+                }
+                case "media" -> {
+                    MediaDetails md = new MediaDetails(bytes, bytes.length);
+                    System.out.println(p + "player=" + md.slotReference.player);
+                    System.out.println(p + "slot=" + md.slotReference.slot);
+                    System.out.println(p + "mediaType=" + md.mediaType);
+                    System.out.println(p + "name=" + md.name);
+                    System.out.println(p + "creationDate=" + md.creationDate);
+                    System.out.println(p + "trackCount=" + md.trackCount);
+                    System.out.println(p + "playlistCount=" + md.playlistCount);
+                    System.out.println(p + "hasMySettings=" + md.hasMySettings);
+                    System.out.println(p + "totalSize=" + md.totalSize);
+                    System.out.println(p + "freeSpace=" + md.freeSpace);
                 }
                 default -> throw new IllegalArgumentException("unknown packet kind " + args[i]);
             }

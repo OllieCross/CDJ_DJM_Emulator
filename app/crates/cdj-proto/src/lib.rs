@@ -29,6 +29,7 @@ pub mod dbserver;
 pub mod error;
 pub mod header;
 pub mod position;
+pub mod requests;
 pub mod status;
 
 pub use announce::{KeepAlive, MIXER_NUM, PLAYER_NUM_MAX, PLAYER_NUM_MIN};
@@ -44,6 +45,7 @@ pub use header::{
     PITCH_NEUTRAL,
 };
 pub use position::PrecisePosition;
+pub use requests::{LoadTrack, LoadTrackAck, MediaQuery, MediaResponse};
 pub use status::{
     ActiveLoop, CdjStatus, DjmStatus, PlayState1, PlayState3, TrackSourceSlot, TrackType,
 };

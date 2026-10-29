@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cdj_proto::{
-    ActiveLoop, Beat, CdjStatus, DeviceName, DjmStatus, PlayState1, PlayState3, PrecisePosition,
-    TrackSourceSlot, TrackType,
+    ActiveLoop, Beat, CdjStatus, DeviceName, DjmStatus, MediaResponse, PlayState1, PlayState3,
+    PrecisePosition, TrackSourceSlot, TrackType,
 };
 
 const BLT_JAR: &str = "/Applications/Beat Link Trigger.app/Contents/app/beat-link-trigger.jar";
@@ -288,4 +288,39 @@ fn beatlink_parses_older_players_status() {
         assert_eq!(field(&format!("{i}.beatNumber")), "33", "{name}");
         assert_eq!(field(&format!("{i}.canReportLooping")), "false", "{name}");
     }
+}
+
+#[test]
+fn beatlink_parses_our_media_response() {
+    let Some(jar) = crosscheck_jar() else { return };
+
+    let response = MediaResponse {
+        device_name: DeviceName::new("CDJ-3000").unwrap(),
+        device_number: 3,
+        player: 3,
+        slot: TrackSourceSlot::Usb,
+        name: "Friday Set".into(),
+        creation_date: "2024-05-01".into(),
+        track_count: 312,
+        color: 0,
+        media_type: TrackType::Rekordbox,
+        has_my_settings: false,
+        playlist_count: 7,
+        total_bytes: 64_000_000_000,
+        free_bytes: 12_345_678,
+    }
+    .encode();
+
+    let seen = parse_with_beatlink(&jar, &[("media", &response)]);
+    let field = |k: &str| seen.get(k).map(String::as_str).unwrap_or("<missing>");
+    assert_eq!(field("0.player"), "3");
+    assert_eq!(field("0.slot"), "USB_SLOT");
+    assert_eq!(field("0.mediaType"), "REKORDBOX");
+    assert_eq!(field("0.name"), "Friday Set");
+    assert_eq!(field("0.creationDate"), "2024-05-01");
+    assert_eq!(field("0.trackCount"), "312");
+    assert_eq!(field("0.playlistCount"), "7");
+    assert_eq!(field("0.hasMySettings"), "false");
+    assert_eq!(field("0.totalSize"), "64000000000");
+    assert_eq!(field("0.freeSpace"), "12345678");
 }

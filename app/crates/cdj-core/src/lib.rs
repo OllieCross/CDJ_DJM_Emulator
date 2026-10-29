@@ -16,6 +16,7 @@ pub mod media;
 pub mod mixer;
 pub mod models;
 pub mod net;
+pub mod remote;
 pub mod rig;
 pub mod track_audio;
 pub mod virtual_cdj;

@@ -120,6 +120,15 @@ const state: RigSnapshot = {
   },
   sources: [{ root: "/Volumes/DEMO_USB", name: "DEMO_USB", inserted: [1, "Usb"] }],
   audio: { device: "MacBook Pro Speakers", muted: false },
+  remote: {
+    listening: true,
+    master: null,
+    log: [
+      { at_ms: Date.now() - 4_000, from: "beat-link", text: "turned sync on for player 2" },
+      { at_ms: Date.now() - 19_000, from: "beat-link", text: "loaded track 4 from player 1's USB on player 3" },
+      { at_ms: Date.now() - 21_000, from: "beat-link", text: "asked what is in player 1's USB slot" },
+    ],
+  },
 };
 
 function player(n: number): PlayerView {

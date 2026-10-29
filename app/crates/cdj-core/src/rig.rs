@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use cdj_proto::announce::MIXER_NUM;
+use cdj_proto::DeviceName;
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
@@ -25,6 +26,7 @@ use crate::link::{DeviceLink, Topology};
 use crate::media::{Medium, PlayerMedia, Slot};
 use crate::mixer::{CrossfaderAssign, MixerControls, MAX_CHANNELS};
 use crate::models::{MixerModel, PlayerModel};
+use crate::remote::{ListenPorts, Remote, RemoteView};
 use crate::track_audio::TrackAudio;
 use crate::virtual_cdj::{VirtualCdj, VirtualCdjConfig};
 use crate::virtual_djm::{VirtualDjm, VirtualDjmConfig};
@@ -52,6 +54,9 @@ pub struct RigConfig {
     pub initial_bpm_hundredths: u16,
     /// Where beat 1 falls in files played without rekordbox analysis.
     pub beat_grid_offset_ms: u32,
+    /// Ports players take commands from client apps on (see
+    /// [`crate::remote`]); `None` to ignore commands.
+    pub listen_ports: Option<ListenPorts>,
 }
 
 impl RigConfig {
@@ -68,15 +73,42 @@ impl RigConfig {
 /// network.
 pub(crate) struct RigShared {
     players: RwLock<BTreeMap<u8, Arc<Deck>>>,
+    models: RwLock<BTreeMap<u8, PlayerModel>>,
     /// Slots of players 1..=4. Media stays in a player while it is off.
     media: BTreeMap<u8, Arc<PlayerMedia>>,
     mixer: Mutex<MixerControls>,
     mixer_running: AtomicBool,
     engine: Arc<AudioEngine>,
     pub(crate) peers_seen: Arc<AtomicU8>,
+    pub(crate) remote: Remote,
 }
 
 impl RigShared {
+    pub(crate) fn deck(&self, n: u8) -> anyhow::Result<Arc<Deck>> {
+        self.players
+            .read()
+            .unwrap()
+            .get(&n)
+            .cloned()
+            .with_context(|| format!("player {n} is not running"))
+    }
+
+    pub(crate) fn player_numbers(&self) -> Vec<u8> {
+        self.players.read().unwrap().keys().copied().collect()
+    }
+
+    /// Whether `device_number` is one of our running devices.
+    pub(crate) fn is_own_device(&self, device_number: u8) -> bool {
+        self.players.read().unwrap().contains_key(&device_number)
+            || (device_number == MIXER_NUM && self.mixer_running.load(Ordering::Relaxed))
+    }
+
+    /// The name player `n` announces itself with.
+    pub(crate) fn device_name(&self, n: u8) -> DeviceName {
+        let model = self.models.read().unwrap().get(&n).copied().unwrap_or(PlayerModel::Cdj3000);
+        DeviceName::new(model.device_name()).expect("model names fit")
+    }
+
     pub(crate) fn media(&self, player: u8) -> Arc<PlayerMedia> {
         self.media.get(&player).cloned().unwrap_or_default()
     }
@@ -121,17 +153,144 @@ impl RigShared {
         (1..=channels).map(|ch| mixer.on_air(ch)).collect()
     }
 
-    /// Synced players play at the tempo master's BPM.
+    /// Synced players play at the tempo master's BPM, whether the master is
+    /// one of ours or a client app.
     fn follow_master(&self) {
-        let Some(master) = self.tempo_master() else {
-            return;
+        let bpm = match self.tempo_master() {
+            Some(master) => master.view().effective_bpm(),
+            None => match self.remote.external_master().and_then(|m| m.bpm) {
+                Some(bpm) => bpm,
+                None => return,
+            },
         };
-        let bpm = master.view().effective_bpm();
         for deck in self.players.read().unwrap().values() {
             if deck.synced() && !deck.master() && deck.loaded().is_some() {
                 deck.follow_bpm(bpm);
             }
         }
+    }
+
+    /// Put a synced player on the tempo master's tempo and beat.
+    fn sync_to_master(&self, deck: &Arc<Deck>, align: bool) {
+        if let Some(m) = self.tempo_master().filter(|m| !Arc::ptr_eq(m, deck)) {
+            deck.follow_bpm(m.view().effective_bpm());
+            if align && m.is_playing() {
+                deck.align_phase(m.beat_phase());
+            }
+        } else if self.tempo_master().is_none() {
+            if let Some(bpm) = self.remote.external_master().and_then(|m| m.bpm) {
+                deck.follow_bpm(bpm);
+                if let Some(phase) = self.remote.master_phase().filter(|_| align) {
+                    deck.align_phase(phase);
+                }
+            }
+        }
+    }
+
+    /// See [`Rig::play`].
+    pub(crate) fn play(&self, n: u8) -> anyhow::Result<()> {
+        let deck = self.deck(n)?;
+        if deck.synced() && !deck.master() {
+            self.sync_to_master(&deck, true);
+        }
+        if self.tempo_master().is_none() && self.remote.external_master().is_none() {
+            deck.set_master(true);
+        }
+        deck.play();
+        Ok(())
+    }
+
+    /// See [`Rig::set_synced`].
+    pub(crate) fn set_synced(&self, n: u8, synced: bool) -> anyhow::Result<()> {
+        let deck = self.deck(n)?;
+        deck.set_synced(synced);
+        if synced && !deck.master() {
+            self.sync_to_master(&deck, deck.is_playing());
+        }
+        Ok(())
+    }
+
+    /// See [`Rig::set_master`].
+    pub(crate) fn become_master(&self, n: u8) -> anyhow::Result<()> {
+        let deck = self.deck(n)?;
+        if deck.master() {
+            return Ok(());
+        }
+        match self.remote.external_master() {
+            Some(master) => self.remote.request_master(n, &self.device_name(n), &master),
+            None => self.take_master(n),
+        }
+        Ok(())
+    }
+
+    /// Player `n` becomes tempo master; whoever had the role among ours
+    /// gives it up.
+    pub(crate) fn take_master(&self, n: u8) {
+        let players = self.players.read().unwrap();
+        let Some(deck) = players.get(&n) else {
+            return;
+        };
+        for d in players.values() {
+            d.set_master(false);
+        }
+        deck.set_master(true);
+        // The master leads; it doesn't follow anyone.
+        deck.set_synced(false);
+    }
+
+    /// See [`Rig::load_track`].
+    pub(crate) async fn load_track(&self, n: u8, source_player: u8, slot: Slot, track_id: u32) -> anyhow::Result<()> {
+        let deck = self.deck(n)?;
+        if source_player != n && !self.players.read().unwrap().contains_key(&source_player) {
+            bail!("player {source_player} is off, so its media can't be reached over the link");
+        }
+        let medium = self
+            .media(source_player)
+            .get(slot)
+            .with_context(|| format!("player {source_player}'s {slot:?} slot is empty"))?;
+        let library = medium.library.clone();
+        let track = library
+            .track_by_id(track_id)
+            .with_context(|| format!("track {track_id} is not on {}", medium.name))?
+            .clone();
+
+        // Reading the analysis and starting the decoder touch the disk.
+        let (audio, grid, cues) = tokio::task::spawn_blocking({
+            let library = library.clone();
+            let track = track.clone();
+            move || {
+                let audio = if track.audio_path.exists() {
+                    TrackAudio::open(&track.audio_path)
+                        .map_err(|e| warn!(track_id, "audio unavailable, metadata-only deck: {e:#}"))
+                        .ok()
+                } else {
+                    warn!(track_id, path = %track.audio_path.display(), "audio file missing, metadata-only deck");
+                    None
+                };
+                let grid = library
+                    .beats_for(&track)
+                    .map(|beats| BeatGrid::from_analysis(&beats))
+                    .unwrap_or_else(|_| BeatGrid::constant(track.bpm_hundredths, 0.0));
+                let cues = library.cues_for(&track).unwrap_or_default();
+                (audio, grid, cues)
+            }
+        })
+        .await
+        .context("loading track panicked")?;
+
+        deck.load(
+            LoadedTrack {
+                library,
+                track_id,
+                source_player,
+                source_slot: slot,
+            },
+            audio,
+            grid,
+            &cues,
+            Some(f64::from(track.duration_s) * 1000.0),
+        );
+        Ok(())
     }
 }
 
@@ -172,6 +331,8 @@ pub struct Rig {
     shared: Arc<RigShared>,
     players: Mutex<BTreeMap<u8, (PlayerHandle, Running)>>,
     mixer: Mutex<Option<(MixerModel, Running)>>,
+    /// The command listener, started with the first device.
+    listener: Mutex<Option<Running>>,
 }
 
 impl Rig {
@@ -189,11 +350,13 @@ impl Rig {
         }
         let shared = Arc::new(RigShared {
             players: RwLock::new(BTreeMap::new()),
+            models: RwLock::new(BTreeMap::new()),
             media: (1..=MAX_PLAYERS).map(|n| (n, Arc::default())).collect(),
             mixer: Mutex::new(MixerControls::default()),
             mixer_running: AtomicBool::new(false),
             engine,
             peers_seen: Arc::new(AtomicU8::new(0)),
+            remote: Remote::new(),
         });
         shared.refresh_mixer();
         spawn_sync_thread(Arc::downgrade(&shared));
@@ -203,7 +366,32 @@ impl Rig {
             shared,
             players: Mutex::new(BTreeMap::new()),
             mixer: Mutex::new(None),
+            listener: Mutex::new(None),
         }
+    }
+
+    /// Start taking commands from client apps (needs the tokio runtime, so
+    /// it starts with the first device rather than in [`Rig::new`]).
+    fn ensure_listener(&self) {
+        let Some(ports) = self.cfg.listen_ports else {
+            return;
+        };
+        let mut listener = self.listener.lock().unwrap();
+        if listener.is_none() {
+            let task = tokio::spawn(crate::remote::run(Arc::downgrade(&self.shared), self.cfg.clone(), ports));
+            *listener = Some(Running(vec![task.abort_handle()]));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared(&self) -> &Arc<RigShared> {
+        &self.shared
+    }
+
+    /// Commands from client apps: whether the players are listening, an
+    /// outside tempo master, and what was asked lately.
+    pub fn remote_view(&self) -> RemoteView {
+        self.shared.remote.view()
     }
 
     pub fn config(&self) -> &RigConfig {
@@ -298,9 +486,11 @@ impl Rig {
             }
             players.insert(n, (handle, running));
         }
+        self.shared.models.write().unwrap().insert(n, model);
         self.shared.players.write().unwrap().insert(n, deck);
         self.update_peers_seen();
         self.shared.refresh_mixer();
+        self.ensure_listener();
         info!(player = n, model = model.display_name(), %ip, "player spawned");
         Ok(())
     }
@@ -314,6 +504,7 @@ impl Rig {
         handle.deck.unload();
         handle.deck.set_master(false);
         self.shared.players.write().unwrap().remove(&n);
+        self.shared.models.write().unwrap().remove(&n);
         self.update_peers_seen();
         info!(player = n, "player despawned");
         true
@@ -462,58 +653,7 @@ impl Rig {
     /// onto player `n`, cued and ready. Loading from another player's media
     /// goes over the link, so that player has to be on.
     pub async fn load_track(&self, n: u8, source_player: u8, slot: Slot, track_id: u32) -> anyhow::Result<()> {
-        let deck = self.deck(n)?;
-        if source_player != n && self.player(source_player).is_none() {
-            bail!("player {source_player} is off, so its media can't be reached over the link");
-        }
-        let medium = self
-            .shared
-            .media(source_player)
-            .get(slot)
-            .with_context(|| format!("player {source_player}'s {slot:?} slot is empty"))?;
-        let library = medium.library.clone();
-        let track = library
-            .track_by_id(track_id)
-            .with_context(|| format!("track {track_id} is not on {}", medium.name))?
-            .clone();
-
-        // Reading the analysis and starting the decoder touch the disk.
-        let (audio, grid, cues) = tokio::task::spawn_blocking({
-            let library = library.clone();
-            let track = track.clone();
-            move || {
-                let audio = if track.audio_path.exists() {
-                    TrackAudio::open(&track.audio_path)
-                        .map_err(|e| warn!(track_id, "audio unavailable, metadata-only deck: {e:#}"))
-                        .ok()
-                } else {
-                    warn!(track_id, path = %track.audio_path.display(), "audio file missing, metadata-only deck");
-                    None
-                };
-                let grid = library
-                    .beats_for(&track)
-                    .map(|beats| BeatGrid::from_analysis(&beats))
-                    .unwrap_or_else(|_| BeatGrid::constant(track.bpm_hundredths, 0.0));
-                let cues = library.cues_for(&track).unwrap_or_default();
-                (audio, grid, cues)
-            }
-        })
-        .await
-        .context("loading track panicked")?;
-
-        deck.load(
-            LoadedTrack {
-                library,
-                track_id,
-                source_player,
-                source_slot: slot,
-            },
-            audio,
-            grid,
-            &cues,
-            Some(f64::from(track.duration_s) * 1000.0),
-        );
-        Ok(())
+        self.shared.load_track(n, source_player, slot, track_id).await
     }
 
     /// Play a file that isn't on any media (CLI `--track`), on a constant
@@ -539,18 +679,7 @@ impl Rig {
     /// to play takes the role, as real players do. A synced player lines its
     /// beat up with the master's.
     pub fn play(&self, n: u8) -> anyhow::Result<()> {
-        let deck = self.deck(n)?;
-        let master = self.shared.tempo_master();
-        match master {
-            None => deck.set_master(true),
-            Some(m) if deck.synced() && !deck.master() && m.is_playing() => {
-                deck.follow_bpm(m.view().effective_bpm());
-                deck.align_phase(m.beat_phase());
-            }
-            Some(_) => {}
-        }
-        deck.play();
-        Ok(())
+        self.shared.play(n)
     }
 
     pub fn pause(&self, n: u8) -> anyhow::Result<()> {
@@ -660,31 +789,16 @@ impl Rig {
         Ok(())
     }
 
-    /// Make player `n` tempo master; whoever had the role gives it up.
+    /// Make player `n` tempo master; whoever had the role gives it up. When
+    /// a client app is master, the player asks it for the role and takes it
+    /// once the app agrees, as real players do.
     pub fn set_master(&self, n: u8) -> anyhow::Result<()> {
-        let deck = self.deck(n)?;
-        for d in self.shared.players.read().unwrap().values() {
-            d.set_master(false);
-        }
-        deck.set_master(true);
-        // The new master leads; it doesn't follow anyone.
-        deck.set_synced(false);
-        Ok(())
+        self.shared.become_master(n)
     }
 
     /// Sync on: follow the master's tempo and line up with its beat.
     pub fn set_synced(&self, n: u8, synced: bool) -> anyhow::Result<()> {
-        let deck = self.deck(n)?;
-        deck.set_synced(synced);
-        if synced {
-            if let Some(m) = self.shared.tempo_master().filter(|m| !Arc::ptr_eq(m, &deck)) {
-                deck.follow_bpm(m.view().effective_bpm());
-                if m.is_playing() && deck.is_playing() {
-                    deck.align_phase(m.beat_phase());
-                }
-            }
-        }
-        Ok(())
+        self.shared.set_synced(n, synced)
     }
 
     // ---------- mixer ----------
@@ -762,10 +876,10 @@ fn channel_index(channel: u8) -> anyhow::Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn rig() -> Rig {
+    pub(crate) fn rig() -> Rig {
         Rig::new(RigConfig {
             topology: Topology {
                 iface: "lo0".into(),
@@ -775,6 +889,7 @@ mod tests {
             addressing: Addressing::Fixed(Ipv4Addr::LOCALHOST),
             initial_bpm_hundredths: 12000,
             beat_grid_offset_ms: 0,
+            listen_ports: None,
         })
     }
 

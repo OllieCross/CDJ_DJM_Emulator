@@ -133,12 +133,36 @@ export interface MixerView {
   controls: MixerControls;
 }
 
+/** The tempo master, when it is a client app rather than one of our players. */
+export interface ExternalMaster {
+  device_number: number;
+  name: string;
+  address: string;
+  bpm: number | null;
+}
+
+export interface RemoteEvent {
+  /** Unix time in ms. */
+  at_ms: number;
+  from: string;
+  text: string;
+}
+
+/** Commands from client apps (Beat Link Trigger, ShowKontrol). */
+export interface RemoteView {
+  listening: boolean;
+  master: ExternalMaster | null;
+  /** Latest first. */
+  log: RemoteEvent[];
+}
+
 export interface RigSnapshot {
   network: NetworkView;
   players: PlayerView[];
   mixer: MixerView;
   sources: SourceView[];
   audio: AudioView;
+  remote: RemoteView;
 }
 
 export function slotLabel(slot: Slot): string {

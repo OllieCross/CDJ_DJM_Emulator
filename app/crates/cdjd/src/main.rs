@@ -169,6 +169,7 @@ fn rig_config(net: &NetArgs) -> Result<RigConfig> {
         addressing,
         initial_bpm_hundredths: 12000,
         beat_grid_offset_ms: 0,
+        listen_ports: Some(Default::default()),
     })
 }
 

@@ -57,7 +57,7 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
 | ✅ | Model picker: 6 player models, 4 mixer models | Done; some per-model details are educated guesses |
 | 🟡 | Compare against real gear (CDJ-3000X ×2, DJM-A9) | Capture script ready, recordings pending |
 | ⬜ | ShowKontrol end-to-end | Not tested yet |
-| ⬜ | Commands from client apps (become master, sync, load track, media queries) | Not yet |
+| ✅ | Commands from client apps: tempo-master handoff, sync, fader start, load track, media queries | Done; each one checked live with beat-link |
 | ⬜ | NFS file sharing | Only if ShowKontrol turns out to need it |
 | ⬜ | Signed `.app`, saving sessions, MIDI control, Windows | Later |
 
@@ -102,6 +102,24 @@ shows against individual tracks without owning or renting four CDJs and a DJM.
   menus to client apps.
 
 <br clear="right">
+
+**Commands from client apps**
+
+The players take the commands Beat Link Trigger (and other Pro DJ Link
+apps) send to real CDJs:
+- **Tempo master** in both directions: a client asks the master player for
+  the role and gets it; pressing MASTER on a player while a client is master
+  asks the client for it, and synced players follow a client master's tempo
+  and beat.
+- **Sync** on / off and "become master".
+- **Fader start**: play, or back to the cue point and stop.
+- **Load track** from any player's USB or SD (over LINK), acknowledged as a
+  player does.
+- **Media queries**: what is in a slot (name, date, track and playlist
+  counts, size and free space).
+
+The **Commands** button in the header shows whether the players are
+listening, a client app that holds tempo master, and the latest commands.
 
 ## Supported models
 
@@ -219,14 +237,19 @@ Network details (all handled by the setup):
   positions and mixer packets go straight to `10.77.77.200`, because macOS
   hands a sender a local copy of every broadcast on a virtual interface and a
   client on the same Mac would otherwise get everything twice.
-- The emulator never binds UDP 50000-50002, so the client apps can run on the
-  same Mac. Beat Link Trigger warns that `feth0` sees the same network; that
-  is expected and harmless.
+- Players listen for commands on their own address (and the broadcast
+  address) on UDP 50001-50002, **only while a client app holds those
+  ports**. macOS lets these sockets share a port with Beat Link Trigger's
+  wildcard sockets only if Beat Link Trigger bound first, so the emulator
+  checks every 250 ms, binds after a client does, and lets go when it
+  leaves; a client can start, stop and restart at any time. The emulator
+  never binds UDP 50000. Beat Link Trigger warns that `feth0` sees the same
+  network; that is expected and harmless.
 
 ## Testing and verification
 
 ```sh
-cd app && cargo test --workspace     # 58 core + 51 protocol tests, 3 beat-link cross-checks
+cd app && cargo test --workspace     # 71 core + 56 protocol tests, 4 beat-link cross-checks
 ```
 
 - **Packets** are checked byte for byte against the templates beat-link
@@ -246,6 +269,16 @@ java -cp "/Applications/Beat Link Trigger.app/Contents/app/beat-link-trigger.jar
 goes online like Beat Link Trigger and reports the devices, status, beats,
 positions, mixer data and track data it gets.
 
+```sh
+cdjd run-fleet --players 3 --silent --library app/vendor/rekordcrate/data/complete_export/demo_tracks
+java -cp "/Applications/Beat Link Trigger.app/Contents/app/beat-link-trigger.jar" \
+    app/tools/beatlink-probe/Commands.java
+```
+
+sends every command Beat Link Trigger can send (media query, load track,
+sync, master handoff both ways, fader start/stop) and checks each one in the
+players' status.
+
 **Against real gear:** with CDJs, a DJM and this Mac on one switch,
 `app/tools/capture-cdj.sh <interface>` records power-on, loading, mixing,
 master/sync and deck controls, one file per step, into `captures/`
@@ -253,9 +286,9 @@ master/sync and deck controls, one file per step, into `captures/`
 
 ## Known limits
 
-- Client apps can't send commands to the virtual decks yet (become master,
-  sync, load track, media queries): the emulator doesn't listen on UDP
-  50000-50002 so those apps can bind them.
+- The load-track acknowledgment's layout isn't documented; beat-link only
+  reads who sent it. A capture from a real CDJ would confirm the rest.
+- Which commands ShowKontrol sends hasn't been checked yet.
 - No NFS file sharing; clients use the dbserver. Whether ShowKontrol needs
   NFS isn't known yet.
 - Model differences beyond those listed above (per-model menus, the

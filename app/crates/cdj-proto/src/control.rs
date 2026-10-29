@@ -18,7 +18,7 @@
 use crate::error::DecodeError;
 use crate::header::{update_kind, DeviceName, UpdateHeader};
 
-fn header(kind: u8, name: &DeviceName, subtype: u8, device_number: u8) -> UpdateHeader {
+pub(crate) fn header(kind: u8, name: &DeviceName, subtype: u8, device_number: u8) -> UpdateHeader {
     UpdateHeader {
         kind,
         device_name: name.clone(),
@@ -27,7 +27,7 @@ fn header(kind: u8, name: &DeviceName, subtype: u8, device_number: u8) -> Update
     }
 }
 
-fn decode_header(buf: &[u8], kind: u8, len: usize) -> Result<UpdateHeader, DecodeError> {
+pub(crate) fn decode_header(buf: &[u8], kind: u8, len: usize) -> Result<UpdateHeader, DecodeError> {
     if buf.len() < len {
         return Err(DecodeError::TooShort {
             need: len,

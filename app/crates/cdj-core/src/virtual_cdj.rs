@@ -90,6 +90,7 @@ impl VirtualCdj {
                         CdjStatus {
                             firmware: model.firmware(),
                             packet_counter: counter,
+                            master_handoff_to: rig.remote.yielding_to(number),
                             ..CdjStatus::idle(name.clone(), number)
                         },
                         &deck,

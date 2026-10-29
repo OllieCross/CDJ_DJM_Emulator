@@ -156,7 +156,7 @@ impl Library {
         Self::pdb_path(root).exists()
     }
 
-    fn pdb_path(root: &Path) -> PathBuf {
+    pub(crate) fn pdb_path(root: &Path) -> PathBuf {
         let pioneer = root.join("PIONEER");
         let legacy = pioneer.join("rekordbox.pdb");
         if legacy.exists() {
@@ -334,6 +334,11 @@ impl Library {
 
     pub fn playlist(&self, id: u32) -> Option<&PlaylistNode> {
         self.playlists.iter().find(|p| p.id == id)
+    }
+
+    /// Playlists (not folders) in the export.
+    pub fn playlist_count(&self) -> usize {
+        self.playlists.iter().filter(|p| !p.is_folder).count()
     }
 
     /// Track IDs of playlist `id`, in playlist order.

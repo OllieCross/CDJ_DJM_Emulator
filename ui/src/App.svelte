@@ -6,6 +6,7 @@
   import Deck from "./lib/Deck.svelte";
   import Mixer from "./lib/Mixer.svelte";
   import Network from "./lib/Network.svelte";
+  import Remote from "./lib/Remote.svelte";
   import type { ModelsView } from "./lib/models";
   import type { RigSnapshot } from "./lib/types";
 
@@ -43,6 +44,7 @@
     <h1>CDJ Emulator</h1>
     {#if snapshot}
       <Network network={snapshot.network} {busy} {run} />
+      <Remote remote={snapshot.remote} />
     {/if}
   </header>
 
